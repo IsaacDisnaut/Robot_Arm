@@ -11,7 +11,10 @@ import json
 import time
 
 TASK_FILE_PATH = '/home/isaac/ros2_ws/src/robot_arm/tasks/data.txt'
-
+L1, L2, L3 = 0.28787, 0.26096, 0.26136
+D6 = 0.07074
+# 🔥 กำหนดระยะ Offset ของ J4 สำหรับวาดกราฟ
+J4_OFFSET_Y = 0.02175 
 class RobotVelocityKinematics:
     def __init__(self):
         # คุณสามารถเก็บค่าพารามิเตอร์คงที่ของหุ่นยนต์ไว้ตรงนี้ได้ในอนาคต
@@ -26,17 +29,21 @@ class RobotVelocityKinematics:
             [0,             0,                           0,                          1]
         ])
 
-    def get_jacobian(self,q, l1, l2, l3, d6, offset_y):
+    def get_jacobian(self,q):
         """
         คำนวณ Geometric Jacobian Matrix (ขนาด 6x6)
         แถว 1-3: ความเร็วเชิงเส้น (Vx, Vy, Vz)
         แถว 4-6: ความเร็วเชิงมุม (Wx, Wy, Wz)
         """
+        l1, l2, l3 = 0.28787, 0.26096, 0.26136
+        d6 = 0.07074
+        # 🔥 กำหนดระยะ Offset ของ J4 สำหรับวาดกราฟ
+        offset_y = 0.02175 
         a1 = 0.020885
     # คำนวณมุมและระยะทแยงที่เกิดจากการยก J4 สูงขึ้น
         gamma = np.arctan2(offset_y, l3)
         l3_eff = np.sqrt(l3**2 + offset_y**2)
-        q1,q2,q3,q4,q5,q6,_,_ = q
+        q1,q2,q3,q4,q5,q6 = q
         # ตาราง DH ชุดเดียวกับหุ่นยนต์ของคุณ
         dh_table = [
         [q1,           l1, a1,  -np.pi/2], 
@@ -96,22 +103,72 @@ class JointPublisher(Node):
     def __init__(self):
         super().__init__('ik_joint_publisher')
         self.publisher = self.create_publisher(JointState, 'joint_states', 10)
+        self.subscription = self.create_subscription(
+            JointState,
+            'joint_states',
+            self.joint_cb,
+            10)
+        
+        # 1. เพิ่มตัวแปรสำหรับเก็บค่า Feedback จาก Subscriber
+        self.current_joint_positions = [0.0] * 6
+        self.current_slider_position = 0.0
+        self.has_received_data = False
 
+        # 2. เพิ่มตัวแปรสำหรับ "พักข้อมูล" ก่อนให้ Timer ส่ง
+        self.joints_to_publish = [0.0] * 6
+        self.rail_to_publish = 0.0
+        self.velocity_to_publish = [0.0] * 7 # (slider 1 ตัว + joints 6 ตัว)
+
+        # 3. สร้าง Timer ให้พ่นข้อมูลทุก 0.02 วินาที (50Hz)
+        self.timer = self.create_timer(0.02, self.timer_callback)
+        
     def publish_joints(self, joints, base_y):
-        joint_msg = JointState()
-        joint_msg.header.stamp = self.get_clock().now().to_msg()
-        joint_msg.name = [
-            'slider_joint', 'joint_1', 'joint_2', 'joint_3',
-            'joint_4', 'joint_5', 'joint_6'
-        ]
-        joint_msg.position = [float(base_y)] + [float(q) for q in joints]
-        self.publisher.publish(joint_msg)
+        """รับคำสั่งแบบ Position (ไม่ต้อง publish ตรงๆ แล้ว ให้แค่บันทึกค่า)"""
+        self.joints_to_publish = [float(q) for q in joints]
+        self.rail_to_publish = float(base_y)
+        # ถ้าสั่ง position แปลว่าไม่ได้สั่ง velocity ให้เคลียร์เป็น 0
+        self.velocity_to_publish = [0.0] * 7
+
+    def publish_joints_velo(self, joints):
+        """รับคำสั่งแบบ Velocity (ไม่ต้อง publish ตรงๆ แล้ว ให้แค่บันทึกค่า)"""
+        # joints ที่รับมามี 6 ตัว (q1-q6) เราเติม 0.0 ไว้ข้างหน้าสำหรับ slider
+        self.velocity_to_publish = [0.0] + [float(q) for q in joints]
+
+    def joint_cb(self, msg):
+        """รับค่าจากหุ่นยนต์จริง (Feedback)"""
+        if len(msg.position) >= 7:
+            self.current_slider_position = msg.position[0]
+            self.current_joint_positions = list(msg.position[1:7])
+            self.has_received_data = True
+            
+            # (ทางเลือก) ถ้าเพิ่งเปิดโปรแกรม ให้ล็อกค่าเริ่มต้นไว้ที่หุ่นจริงป้องกันหุ่นกระชากไปที่ 0
+            if not any(self.joints_to_publish): 
+                self.joints_to_publish = list(msg.position[1:7])
+                self.rail_to_publish = msg.position[0]
+
+    def timer_callback(self):
+        """ฟังก์ชันเดียวที่ทำหน้าที่ Publish ออกสู่โลกภายนอก"""
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = ['slider_joint', 'joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']
+        
+        # 🟢 ลอจิก Integration 
+        # เช็คก่อนว่ามีการสั่งความเร็วเข้ามาหรือไม่ (ถ้าตัวแปร velocity ไม่ใช่ 0)
+        # ถ้ามีความเร็ว ให้ค่อยๆ บวกเข้าไปใน Position 
+        dt = 0.02
+        if any(v != 0.0 for v in self.velocity_to_publish):
+            self.rail_to_publish += self.velocity_to_publish[0] * dt
+            for i in range(6):
+                self.joints_to_publish[i] += self.velocity_to_publish[i+1] * dt 
+
+        # จัดเตรียมข้อมูลส่ง
+        msg.position = [float(self.rail_to_publish)] + [float(q) for q in self.joints_to_publish]
+        msg.velocity = [float(v) for v in self.velocity_to_publish]
+        
+        self.publisher.publish(msg)
 
 # ================= Robot Params =================
-L1, L2, L3 = 0.28787, 0.26096, 0.26136
-D6 = 0.07074
-# 🔥 กำหนดระยะ Offset ของ J4 สำหรับวาดกราฟ
-J4_OFFSET_Y = 0.02175 
+
 jacobian = RobotVelocityKinematics()
 # ================= Math & Kinematics =================
 def rpy_to_matrix(roll, pitch, yaw):
@@ -278,39 +335,141 @@ btn_reset = Button(ax_button_reset, 'RESET HOME', color='salmon', hovercolor='re
 btn_run = Button(ax_button_save, 'Run Position', color='green', hovercolor='lime')
 
 def reset_home(event):
-    """ฟังก์ชันที่จะถูกรันเมื่อกดปุ่ม"""
-    print("Resetting to Home Position...")
-    s_base_y.set_val(init_base_y)
-    s_x.set_val(init_x)
-    s_y.set_val(init_y)
-    s_z.set_val(init_z)
-    s_roll.set_val(init_roll)
-    s_pitch.set_val(init_pitch)
-    s_yaw.set_val(init_yaw)
-    # ฟังก์ชัน set_val() จะไปเรียกฟังก์ชัน update() อัตโนมัติ ไม่ต้องเรียกซ้ำครับ
+    # 1. จัดการเป้าหมาย (Targets)
+    
+    tar_q = [0.0,-1.5708,1.5708,0,0,0]
+    target_slider = 0    
+    speed_pct = 40       
+    
+    # 2. ตั้งค่า PD Gain (ต้องปรับจูนตามความเหมาะสมของหุ่นจริง)
+    # Kp: ยิ่งเยอะยิ่งวิ่งเร็วเข้าหาเป้าหมาย
+    # Kd: ช่วยเบรก ลดการสะบัด/สั่นเมื่อใกล้ถึงจุดหยุด
+    Kp = 5.0 * (speed_pct / 100.0)
+    Kd = 0.1
+    
+    dt = 0.05 # แนะนำ 0.01 (100Hz) หรือ 0.05 (20Hz) สำหรับ Matplotlib
+    prev_error_q = np.zeros(6)
+    
+    print(f"🚀 เคลื่อนที่ด้วย PD Control (Kp: {Kp}, Kd: {Kd})")
+
+    # 4. ลูปควบคุม
+    while True:
+        current_q = np.array(node.current_joint_positions) 
+        # current_slider = node.current_slider_position
+
+        # ข. คำนวณ Error ของ Joint Position
+        error_q = tar_q - current_q
+        
+        # ค. คำนวณความแตกต่างของ Error (Derivative)
+        derivative_q = (error_q - prev_error_q) / dt
+        
+        # ง. กฎการควบคุม PD (PD Control Law)
+        q_dot = (Kp * error_q) + (Kd * derivative_q)
+        
+        # จ. จำกัดความเร็วสูงสุด (Safety Limit)
+        max_limit = 1.5 # rad/s
+        q_dot = np.clip(q_dot, -max_limit, max_limit)
+
+        # 🟢 1. เช็คว่าแกนไหนถึงเป้าหมายแล้วบ้าง (ค่า error เป็นบวกหรือลบก็ต้องน้อยกว่า 0.005)
+        reached_mask = np.abs(error_q) < 0.001
+        
+        # 🟢 2. บังคับให้แกนที่ถึงแล้ว มีความเร็วเป็น 0 ทันที (แกนอื่นที่ยังไม่ถึงก็วิ่งต่อไป)
+        q_dot[reached_mask] = 0.0
+
+        # ช. ส่งค่าความเร็วไปที่ ROS 2
+        node.publish_joints_velo(q_dot.tolist())
+        
+        # เก็บค่า Error ไว้ใช้ในรอบถัดไป
+        prev_error_q = error_q
+        print(f"Error: {error_q}")
+        print(f"Velo : {q_dot}")
+        
+        if np.all(reached_mask):
+            T_cur_list = forward_kinematics_visual(node.current_joint_positions, L1, L2, L3, D6, J4_OFFSET_Y, node.current_slider_position)
+            x_c, y_c, z_c, r_c, p_c, yw_c = matrix_to_rpy(T_cur_list[-1])
+            # ข. อัปเดตตัวเลข Slider ของพิกัด End-Effector
+            s_x.set_val(x_c)
+            s_y.set_val(y_c)
+            s_z.set_val(z_c)
+            s_roll.set_val(r_c)
+            s_pitch.set_val(p_c)
+            s_yaw.set_val(yw_c)
+            print("🎯 ทุกแกนเข้าสู่ตำแหน่งเป้าหมายแล้ว!")
+            break
+        
+            
+        plt.pause(dt)
+        
+    # เมื่อออกจากลูปแล้ว ส่งคำสั่งหยุดสนิทอีกครั้งเพื่อความชัวร์
+    node.publish_joints_velo([0.0]*6)
+
+    # 5. จบการทำงาน
+    node.publish_joints_velo([0.0]*6) # สั่งหยุดสนิท
+    print("✅ ถึงตำแหน่งเป้าหมายด้วย PD Control เรียบร้อยแล้ว")
 
 def move_save(task):
-        tol = 1e-4
-        tar_q = task[:6]
-        slider = task[5]
-        cur_pose = np.array([s_x.val, s_y.val, s_z.val])
-        roll, pitch, yaw = np.radians(s_roll.val), np.radians(s_pitch.val), np.radians(s_yaw.val)
-        cur_orient = rpy_to_matrix(roll, pitch, yaw)
-        current_q = inverse_kinematics_6dof(cur_pose, cur_orient, L1, L2, L3, D6)
-        idle = False
-        step = 0.5*task[6]/100
-        T = forward_kinematics_visual(tar_q, L1, L2, L3, D6, J4_OFFSET_Y, slider)
-        T_end = T[-1]
-        x_s,y_s,z_s,roll_s,pitch_s,yaw_s = matrix_to_rpy(T_end)
-        s_base_y.set_val(slider)
-        s_x.set_val(x_s)
-        s_y.set_val(y_s)
-        s_z.set_val(z_s)
-        s_roll.set_val(roll_s)
-        s_pitch.set_val(pitch_s)
-        s_yaw.set_val(yaw_s)
-        node.publish_joints(tar_q, slider)
+    # 1. จัดการเป้าหมาย (Targets)
+    tar_q = np.radians(task[:6])  
+    target_slider = task[6]     
+    speed_pct = task[7]         
+    
+    # 2. ตั้งค่า PD Gain (ต้องปรับจูนตามความเหมาะสมของหุ่นจริง)
+    # Kp: ยิ่งเยอะยิ่งวิ่งเร็วเข้าหาเป้าหมาย
+    # Kd: ช่วยเบรก ลดการสะบัด/สั่นเมื่อใกล้ถึงจุดหยุด
+    Kp = 5.0 * (speed_pct / 100.0)
+    Kd = 0.1
+    
+    dt = 0.05 # แนะนำ 0.01 (100Hz) หรือ 0.05 (20Hz) สำหรับ Matplotlib
+    prev_error_q = np.zeros(6)
+    
+    print(f"🚀 เคลื่อนที่ด้วย PD Control (Kp: {Kp}, Kd: {Kd})")
+
+    # 4. ลูปควบคุม
+    while True:
+        current_q = np.array(node.current_joint_positions) 
+        # current_slider = node.current_slider_position
+
+        # ข. คำนวณ Error ของ Joint Position
+        error_q = tar_q - current_q
         
+        # ค. คำนวณความแตกต่างของ Error (Derivative)
+        derivative_q = (error_q - prev_error_q) / dt
+        
+        # ง. กฎการควบคุม PD (PD Control Law)
+        q_dot = (Kp * error_q) + (Kd * derivative_q)
+        
+        # จ. จำกัดความเร็วสูงสุด (Safety Limit)
+        max_limit = 1.5 # rad/s
+        q_dot = np.clip(q_dot, -max_limit, max_limit)
+
+        # 🟢 1. เช็คว่าแกนไหนถึงเป้าหมายแล้วบ้าง (ค่า error เป็นบวกหรือลบก็ต้องน้อยกว่า 0.005)
+        reached_mask = np.abs(error_q) < 0.005
+        
+        # 🟢 2. บังคับให้แกนที่ถึงแล้ว มีความเร็วเป็น 0 ทันที (แกนอื่นที่ยังไม่ถึงก็วิ่งต่อไป)
+        q_dot[reached_mask] = 0.0
+
+        # ช. ส่งค่าความเร็วไปที่ ROS 2
+        node.publish_joints_velo(q_dot.tolist())
+        
+        # เก็บค่า Error ไว้ใช้ในรอบถัดไป
+        prev_error_q = error_q
+        print(f"Error: {error_q}")
+        print(f"Velo : {q_dot}")
+        
+        if np.all(reached_mask):
+            print("🎯 ทุกแกนเข้าสู่ตำแหน่งเป้าหมายแล้ว!")
+            break
+        
+            
+        plt.pause(dt)
+        
+    # เมื่อออกจากลูปแล้ว ส่งคำสั่งหยุดสนิทอีกครั้งเพื่อความชัวร์
+    node.publish_joints_velo([0.0]*6)
+
+    # 5. จบการทำงาน
+    node.publish_joints_velo([0.0]*6) # สั่งหยุดสนิท
+    print("✅ ถึงตำแหน่งเป้าหมายด้วย PD Control เรียบร้อยแล้ว")
+
 def run_pose(event):
     path = '/home/isaac/ros2_ws/src/robot_arm/tasks/data.txt'
     target_task = None
@@ -339,15 +498,16 @@ def run_pose(event):
             for i in task_list:
                 task=[]
                 print(f"seq: {i.get("sequence")} name:{i.get("label")}")
-                for j in range(1,6):
+                for j in range(1,7):
                     task.append(i.get(f"j{j}"))
                     print(f"moving q{j} to {task[j-1]}")
                 task.append(i.get("rail"))
                 task.append(i.get("speed"))
-                print(f"moving rail to {task[5]} with speed {task[6]} %")
+                print(f"moving rail to {task[6]} with speed {task[7]} %")
                 move_save(task)
-                time.sleep(2)
-                    
+                time.sleep(0.001)
+                reset_home(event)
+
     
         
 # ผูกฟังก์ชันเข้ากับการคลิกปุ่ม
