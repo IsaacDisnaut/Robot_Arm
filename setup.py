@@ -30,7 +30,10 @@ setup(
     license='TODO',
     entry_points={
         'console_scripts': [
-            'IK = robot_arm.testarm:main',
+            'IK = robot_arm.arm_controller:main',
+            'mov_py = robot_arm.mov:main',
+            
+
         ],
     },
 )

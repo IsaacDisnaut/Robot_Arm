@@ -1,397 +1,439 @@
-
-#######################################################################################
-# Progam: Inverse Kinematics for a Robotic Arm Using the Pseudoinverse of the Jacobian
-# Description: Given a desired end position (x, y, z) of the end effector of a robot, 
-#   calculate the joint angles (i.e. angles for the servo motors).
-# Author: Addison Sears-Collins
-# Website: https://automaticaddison.com
-# Date: October 15, 2020
-#######################################################################################
+import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider, CheckButtons, Button # 🔥 เพิ่ม Button เข้ามา
+from mpl_toolkits.mplot3d import Axes3D
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+import threading
+import os
+import json
+import time
 
-import numpy as np # Scientific computing library 
- 
-def axis_angle_rot_matrix(k,q):
-    """
-    Creates a 3x3 rotation matrix in 3D space from an axis and an angle.
- 
-    Input
-    :param k: A 3 element array containing the unit axis to rotate around (kx,ky,kz) 
-    :param q: The angle (in radians) to rotate by
- 
-    Output
-    :return: A 3x3 element matix containing the rotation matrix
-     
-    """
-     
-    #15 pts 
-    c_theta = np.cos(q)
-    s_theta = np.sin(q)
-    v_theta = 1 - np.cos(q)
-    kx = k[0]
-    ky = k[1]
-    kz = k[2]   
-     
-    # First row of the rotation matrix
-    r00 = kx * kx * v_theta + c_theta
-    r01 = kx * ky * v_theta - kz * s_theta
-    r02 = kx * kz * v_theta + ky * s_theta
-     
-    # Second row of the rotation matrix
-    r10 = kx * ky * v_theta + kz * s_theta
-    r11 = ky * ky * v_theta + c_theta
-    r12 = ky * kz * v_theta - kx * s_theta
-     
-    # Third row of the rotation matrix
-    r20 = kx * kz * v_theta - ky * s_theta
-    r21 = ky * kz * v_theta + kx * s_theta
-    r22 = kz * kz * v_theta + c_theta
-     
-    # 3x3 rotation matrix
-    rot_matrix = np.array([[r00, r01, r02],
-                           [r10, r11, r12],
-                           [r20, r21, r22]])
-                            
-    return rot_matrix
- 
-def hr_matrix(k,t,q):
-    '''
-    Create the Homogenous Representation matrix that transforms a point from Frame B to Frame A.
-    Using the axis-angle representation
-    Input
-    :param k: A 3 element array containing the unit axis to rotate around (kx,ky,kz) 
-    :param t: The translation from the current frame (e.g. Frame A) to the next frame (e.g. Frame B)
-    :param q: The rotation angle (i.e. joint angle)
- 
-    Output
-    :return: A 4x4 Homogenous representation matrix
-    '''
-    # Calculate the rotation matrix (angle-axis representation)
-    rot_matrix_A_B = axis_angle_rot_matrix(k,q)
-     
-    # Store the translation vector t
-    translation_vec_A_B = t
- 
-    # Convert to a 2D matrix
-    t0 = translation_vec_A_B[0]
-    t1 = translation_vec_A_B[1]
-    t2 = translation_vec_A_B[2]
-    translation_vec_A_B = np.array([[t0],
-                                    [t1],
-                                    [t2]])
-                                     
-    # Create the homogeneous transformation matrix
-    homgen_mat = np.concatenate((rot_matrix_A_B, translation_vec_A_B), axis=1) # side by side
- 
-    # Row vector for bottom of homogeneous transformation matrix
-    extra_row_homgen = np.array([[0, 0, 0, 1]])
- 
-    # Add extra row to homogeneous transformation matrix    
-    homgen_mat = np.concatenate((homgen_mat, extra_row_homgen), axis=0) # one above the other
-         
-    return homgen_mat
- 
-class RoboticArm:
-    def __init__(self,k_arm,t_arm):
-        '''
-        Creates a robotic arm class for computing position and velocity.
- 
-        Input
-        :param k_arm: A 2D array that lists the different axes of rotation (rows) for each joint.
-        :param t_arm: A 2D array that lists the translations from the previous joint to the current joint
-                      The first translation is from the global (base) frame to joint 1 (which is often equal to the global frame)
-                      The second translation is from joint 1 to joint 2, etc.
-        '''
-        self.k = np.array(k_arm)
-        self.t = np.array(t_arm)
-        assert k_arm.shape == t_arm.shape, 'Warning! Improper definition of rotation axes and translations'
-        self.N_joints = k_arm.shape[0]
- 
-    def position(self,Q,index=-1,p_i=[0,0,0]):
-        '''
-        Compute the position in the global (base) frame of a point given in a joint frame
-        (default values will assume the input position vector is in the frame of the last joint)
-        Input
-        :param p_i: A 3 element vector containing a position in the frame of the index joint
-        :param index: The index of the joint frame being converted from (first joint is 0, the last joint is N_joints - 1)
- 
-        Output
-        :return: A 3 element vector containing the new position with respect to the global (base) frame
-        '''
-        # The position of this joint described by the index
-        p_i_x = p_i[0]
-        p_i_y = p_i[1]
-        p_i_z = p_i[2]
-        this_joint_position = np.array([[p_i_x],
-                                        [p_i_y],
-                                        [p_i_z],
-                                        [1]])
- 
-        # End effector joint
-        if (index == -1):
-          index = self.N_joints - 1
-         
-        # Store the original index of this joint        
-        orig_joint_index = index
- 
-        # Store the result of matrix multiplication
-        running_multiplication = None
-         
-        # Start from the index of this joint and work backwards to index 0
-        while (index >= 0):
-           
-          # If we are at the original joint index
-          if (index == orig_joint_index):
-            running_multiplication = hr_matrix(self.k[index],self.t[index],Q[index]) @ this_joint_position
-          # If we are not at the original joint index
-          else: 
-            running_multiplication = hr_matrix(self.k[index],self.t[index],Q[index]) @ running_multiplication
-           
-          index = index - 1
-         
-        # extract the points
-        px = running_multiplication[0][0]
-        py = running_multiplication[1][0]
-        pz = running_multiplication[2][0]       
-         
-        position_global_frame = np.array([px, py, pz])
-         
-        return position_global_frame
- 
-    def pseudo_inverse(self,theta_start,p_eff_N,goal_position,max_steps=np.inf):
-        '''
-        Performs the inverse kinematics using the pseudoinverse of the Jacobian
- 
-        :param theta_start: An N element array containing the current joint angles in radians (e.g. np.array([np.pi/8,np.pi/4,np.pi/6]))
-        :param p_eff_N: A 3 element vector containing translation from the last joint to the end effector in the last joints frame of reference
-        :param goal_position: A 3 element vector containing the desired end position for the end effector in the global (base) frame
-        :param max_steps: (Optional) Maximum number of iterations to compute 
- 
-        Output
-        :return: An N element vector containing the joint angles that result in the end effector reaching xend (i.e. the goal)
-        '''
-        v_step_size = 0.05
-        theta_max_step = 0.2
-        Q_j = theta_start # Array containing the starting joint angles
-        p_end = np.array([goal_position[0], goal_position[1], goal_position[2]]) # desired x, y, z coordinate of the end effector in the base frame
-        p_j = self.position(Q_j,p_i=p_eff_N)  # x, y, z coordinate of the position of the end effector in the global reference frame
-        delta_p = p_end - p_j  # delta_x, delta_y, delta_z between start position and desired final position of end effector
-        j = 0 # Initialize the counter variable
-         
-        # While the magnitude of the delta_p vector is greater than 0.01 
-        # and we are less than the max number of steps
-        while np.linalg.norm(delta_p) > 0.01 and j<max_steps:
-            print(f'j{j}: Q[{Q_j}] , P[{p_j}]') # Print the current joint angles and position of the end effector in the global frame
-             
-            # Reduce the delta_p 3-element delta_p vector by some scaling factor 
-            # delta_p represents the distance between where the end effector is now and our goal position.          
-            v_p = delta_p * v_step_size / np.linalg.norm(delta_p) 
- 
-            # Get the jacobian matrix given the current joint angles
-            J_j = self.jacobian(Q_j,p_eff_N)
-              
-            # Calculate the pseudo-inverse of the Jacobian matrix
-            J_invj = np.linalg.pinv(J_j)
-             
-            # Multiply the two matrices together
-            v_Q = np.matmul(J_invj,v_p)
- 
-            # Move the joints to new angles
-            # We use the np.clip method here so that the joint doesn't move too much. We
-            # just want the joints to move a tiny amount at each time step because 
-            # the full motion of the end effector is nonlinear, and we're approximating the
-            # big nonlinear motion of the end effector as a bunch of tiny linear motions.
-            Q_j = Q_j + np.clip(v_Q,-1*theta_max_step,theta_max_step)#[:self.N_joints]
- 
-            # Get the current position of the end-effector in the global frame
-            p_j = self.position(Q_j,p_i=p_eff_N)
- 
-            # Increment the time step           
-            j = j + 1
- 
-            # Determine the difference between the new position and the desired end position
-            delta_p = p_end - p_j
- 
-        # Return the final angles for each joint
-        return Q_j
- 
- 
-    def jacobian(self,Q,p_eff_N=[0,0,0]):
-        '''
-        Computes the Jacobian (just the position, not the orientation)
- 
-        :param Q: An N element array containing the current joint angles in radians
-        :param p_eff_N: A 3 element vector containing translation from the last joint to the end effector in the last joints frame of reference
- 
-        Output
-        :return: A 3xN 2D matrix containing the Jacobian matrix
-        '''
-        # Position of the end effector in global frame
-        p_eff = self.position(Q,-1,p_eff_N)
-         
-        first_iter = True
-         
-        jacobian_matrix = None
-         
-        for i in range(0, self.N_joints):
-          if (first_iter == True):
- 
-            # Difference in the position of the end effector in the global frame
-            # and this joint in the global frame
-            p_eff_minus_this_p = p_eff - self.position(Q,index=i)
-             
-            # Axes
-            kx = self.k[i][0]
-            ky = self.k[i][1]
-            kz = self.k[i][2]
-            k = np.array([kx, ky, kz])
-             
-            px = p_eff_minus_this_p[0]
-            py = p_eff_minus_this_p[1]
-            pz = p_eff_minus_this_p[2]
-            p_eff_minus_this_p = np.array([px, py, pz])
-             
-            this_jacobian = np.cross(k, p_eff_minus_this_p) 
-  
-            # Convert to a 2D matrix
-            j0 = this_jacobian[0]
-            j1 = this_jacobian[1]
-            j2 = this_jacobian[2]
-            this_jacobian = np.array([[j0],
-                                      [j1],
-                                      [j2]])            
-            jacobian_matrix = this_jacobian
-            first_iter = False
-          else:
-            p_eff_minus_this_p = p_eff - self.position(Q,index=i)
-             
-            # Axes
-            kx = self.k[i][0]
-            ky = self.k[i][1]
-            kz = self.k[i][2]
-            k = np.array([kx, ky, kz])
-             
-            # Difference between this joint's position and end effector's position
-            px = p_eff_minus_this_p[0]
-            py = p_eff_minus_this_p[1]
-            pz = p_eff_minus_this_p[2]
-            p_eff_minus_this_p = np.array([px, py, pz])
-             
-            this_jacobian = np.cross(k, p_eff_minus_this_p) 
- 
-            # Convert to a 2D matrix
-            j0 = this_jacobian[0]
-            j1 = this_jacobian[1]
-            j2 = this_jacobian[2]
-            this_jacobian = np.array([[j0],
-                                      [j1],
-                                      [j2]])            
-            jacobian_matrix = np.concatenate((jacobian_matrix, this_jacobian), axis=1) # side by side           
- 
-        return jacobian_matrix
+TASK_FILE_PATH = '/home/isaac/ros2_ws/src/robot_arm/tasks/data.txt'
+
+class RobotVelocityKinematics:
+    def __init__(self):
+        # คุณสามารถเก็บค่าพารามิเตอร์คงที่ของหุ่นยนต์ไว้ตรงนี้ได้ในอนาคต
+        pass
+
+    def _dh_matrix(self, theta, d, a, alpha):
+        """(Private) สร้าง Transformation Matrix 4x4 จากพารามิเตอร์ DH"""
+        return np.array([
+            [np.cos(theta), -np.sin(theta)*np.cos(alpha),  np.sin(theta)*np.sin(alpha), a*np.cos(theta)],
+            [np.sin(theta),  np.cos(theta)*np.cos(alpha), -np.cos(theta)*np.sin(alpha), a*np.sin(theta)],
+            [0,             np.sin(alpha),               np.cos(alpha),              d],
+            [0,             0,                           0,                          1]
+        ])
+
+    def get_jacobian(self,q, l1, l2, l3, d6, offset_y):
+        """
+        คำนวณ Geometric Jacobian Matrix (ขนาด 6x6)
+        แถว 1-3: ความเร็วเชิงเส้น (Vx, Vy, Vz)
+        แถว 4-6: ความเร็วเชิงมุม (Wx, Wy, Wz)
+        """
+        a1 = 0.020885
+    # คำนวณมุมและระยะทแยงที่เกิดจากการยก J4 สูงขึ้น
+        gamma = np.arctan2(offset_y, l3)
+        l3_eff = np.sqrt(l3**2 + offset_y**2)
+        q1,q2,q3,q4,q5,q6,_,_ = q
+        # ตาราง DH ชุดเดียวกับหุ่นยนต์ของคุณ
+        dh_table = [
+        [q1,           l1, a1,  -np.pi/2], 
+        [q2,           0,  l2,  0      ], 
+        # 🔥 กราฟิก: J3 หมุนเงยขึ้นหลบโครงสร้าง (ใส่เครื่องหมายลบ)
+        [q3 + np.pi/2 - gamma, 0,  0,   np.pi/2], 
+        # 🔥 กราฟิก: ระยะ L3 ยืดออกเป็นเส้นทแยงมุม
+        [q4,           l3_eff, 0,  -np.pi/2], 
+        [q5+gamma,     0,  0,   np.pi/2], 
+        [q6,           d6, 0,   0      ]  
+    ]
+
+        # สะสมเมทริกซ์การแปลงพิกัด
+        T_matrices = [np.eye(4)]
+        T = np.eye(4)
+        for row in dh_table:
+            T = T @ self._dh_matrix(*row)
+            T_matrices.append(T)
+
+        # พิกัดของปลายมือ (End-effector)
+        p_e = T_matrices[-1][0:3, 3]
+
+        J = np.zeros((6, 6))
+
+        for i in range(6):
+            z_i = T_matrices[i][0:3, 2]  # แกนหมุน
+            p_i = T_matrices[i][0:3, 3]  # จุดกำเนิดข้อต่อ
+
+            # ครึ่งบน: Linear Velocity (Vx, Vy, Vz)
+            J[0:3, i] = np.cross(z_i, (p_e - p_i))
+            # ครึ่งล่าง: Angular Velocity (Wx, Wy, Wz)
+            J[3:6, i] = z_i
+
+        return J
+
+    def forward_velocity(self, q, q_dot):
+        """
+        รับค่า: มุมปัจจุบัน (q) และ ความเร็วมอเตอร์ (q_dot) [ขนาด 6x1]
+        คืนค่า: ความเร็วปลายมือ [Vx, Vy, Vz, Wx, Wy, Wz]
+        """
+        J = self.get_jacobian(q)
+        return J @ np.array(q_dot)
+
+    def inverse_velocity(self, q, target_velocity):
+        """
+        รับค่า: มุมปัจจุบัน (q) และ ความเร็วปลายมือที่ต้องการ [Vx, Vy, Vz, Wx, Wy, Wz]
+        คืนค่า: ความเร็วมอเตอร์ที่ต้องสั่ง (q_dot) [ขนาด 6x1]
+        """
+        J = self.get_jacobian(q)
+        
+        # ใช้ Pseudo-inverse ป้องกัน Singularity
+        J_pinv = np.linalg.pinv(J)
+        return J_pinv @ np.array(target_velocity)
+
+# ================= ROS2 Node =================
+class JointPublisher(Node):
+    def __init__(self):
+        super().__init__('ik_joint_publisher')
+        self.publisher = self.create_publisher(JointState, 'joint_states', 10)
+
+    def publish_joints(self, joints, base_y):
+        joint_msg = JointState()
+        joint_msg.header.stamp = self.get_clock().now().to_msg()
+        joint_msg.name = [
+            'slider_joint', 'joint_1', 'joint_2', 'joint_3',
+            'joint_4', 'joint_5', 'joint_6'
+        ]
+        joint_msg.position = [float(base_y)] + [float(q) for q in joints]
+        self.publisher.publish(joint_msg)
+
+# ================= Robot Params =================
+L1, L2, L3 = 0.28787, 0.26096, 0.26136
+D6 = 0.07074
+# 🔥 กำหนดระยะ Offset ของ J4 สำหรับวาดกราฟ
+J4_OFFSET_Y = 0.02175 
+jacobian = RobotVelocityKinematics()
+# ================= Math & Kinematics =================
+def rpy_to_matrix(roll, pitch, yaw):
+    Rx = np.array([[1, 0, 0], [0, np.cos(roll), -np.sin(roll)], [0, np.sin(roll), np.cos(roll)]])
+    Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)], [0, 1, 0], [-np.sin(pitch), 0, np.cos(pitch)]])
+    Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
+    return Rz @ Ry @ Rx
+
+def matrix_to_rpy(T):
+    """แปลง Transformation Matrix เป็น x, y, z, roll, pitch, yaw"""
+    # ดึงพิกัด x, y, z
+    x = T[0, 3]
+    y = T[1, 3]
+    z = T[2, 3]
     
-    def plot_arm(self, Q, p_eff_N=[0,0,0], title="Robot Arm"):
-        """
-        Plot the robotic arm linkage in 3D
-        """
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
+    # ดึงเมทริกซ์การหมุน (Rotation Matrix 3x3)
+    R = T[:3, :3]
+    
+    # คำนวณ Pitch (รอบแกน Y)
+    pitch = np.arctan2(-R[2, 0], np.sqrt(R[0, 0]**2 + R[1, 0]**2))
+    
+    # เช็คสภาวะ Gimbal Lock (Pitch +- 90 องศา)
+    if np.abs(pitch - np.pi/2) < 1e-6:
+        yaw = 0.0
+        roll = np.arctan2(R[0, 1], R[0, 2])
+    elif np.abs(pitch + np.pi/2) < 1e-6:
+        yaw = 0.0
+        roll = -np.arctan2(R[0, 1], R[0, 2])
+    else:
+        # สภาวะปกติ
+        yaw = np.arctan2(R[1, 0], R[0, 0])
+        roll = np.arctan2(R[2, 1], R[2, 2])
+        
+    # แปลงจากเรเดียนเป็นองศา
+    roll_deg = np.degrees(roll)
+    pitch_deg = np.degrees(pitch)
+    yaw_deg = np.degrees(yaw)
+    
+    return x, y, z, roll_deg, pitch_deg, yaw_deg
 
-        joint_positions = []
+def get_transform(theta, d, a, alpha):
+    return np.array([
+        [np.cos(theta), -np.sin(theta)*np.cos(alpha),  np.sin(theta)*np.sin(alpha), a*np.cos(theta)],
+        [np.sin(theta),  np.cos(theta)*np.cos(alpha), -np.cos(theta)*np.sin(alpha), a*np.sin(theta)],
+        [0,              np.sin(alpha),                np.cos(alpha),               d],
+        [0,              0,                            0,                           1]
+    ])
 
-        # Base
-        joint_positions.append(np.array([0,0,0]))
+# 🔥 ฟังก์ชันที่ใช้วาดกราฟิกโดยเฉพาะ (มี J4 Offset + Base Track Y)
+def forward_kinematics_visual(q, l1, l2, l3, d6, offset_y, base_y=0.0):
+    q1, q2, q3, q4, q5, q6 = q
+    a1 = 0.020885
+    # คำนวณมุมและระยะทแยงที่เกิดจากการยก J4 สูงขึ้น
+    gamma = np.arctan2(offset_y, l3)
+    l3_eff = np.sqrt(l3**2 + offset_y**2)
+    
+    dh_params = [
+        [q1,           l1, a1,  -np.pi/2], 
+        [q2,           0,  l2,  0      ], 
+        # 🔥 กราฟิก: J3 หมุนเงยขึ้นหลบโครงสร้าง (ใส่เครื่องหมายลบ)
+        [q3 + np.pi/2 - gamma, 0,  0,   np.pi/2], 
+        # 🔥 กราฟิก: ระยะ L3 ยืดออกเป็นเส้นทแยงมุม
+        [q4,           l3_eff, 0,  -np.pi/2], 
+        [q5+gamma,     0,  0,   np.pi/2], 
+        [q6,           d6, 0,   0      ]  
+    ]
+    
+    T = np.eye(4)
+    # 🔥 เลื่อนฐานหุ่นยนต์ไปตามรางแกน Y
+    T[1, 3] = base_y 
+    
+    T_list = [T.copy()]
+    for params in dh_params:
+        T = T @ get_transform(*params)
+        T_list.append(T.copy())
+    return T_list
 
-        # Get each joint position
-        for i in range(self.N_joints):
-            joint_positions.append(self.position(Q, index=i))
+# ฟังก์ชัน IK หลัก (ไม่มีออฟเซ็ต คลีน 100%)
+def inverse_kinematics_6dof(local_target_pos, target_orient, l1, l2, l3, d6):
+    xc, yc, zc = local_target_pos - d6 * target_orient[:, 2]
+    a1 = 0.020885
+    q1 = np.arctan2(yc, xc)
 
-        # End effector
-        joint_positions.append(self.position(Q, index=-1, p_i=p_eff_N))
+    r = np.sqrt(xc**2 + yc**2)
+    s = zc - l1
+    D_sq = r**2 + s**2
+    
+    cos_q3 = (D_sq - l2**2 - l3**2) / (2 * l2 * l3)
+    
+    reachable = True
+    if cos_q3 > 1.0 or cos_q3 < -1.0:
+        reachable = False
+        cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+        
+    sin_q3 = np.sqrt(1 - cos_q3**2) 
+    q3 = np.arctan2(sin_q3, cos_q3)
 
-        joint_positions = np.array(joint_positions)
+    beta = np.arctan2(l3 * np.sin(q3), l2 + l3 * np.cos(q3))
+    q2 = np.arctan2(-s, r) - beta
 
-        # Plot links
-        ax.plot(joint_positions[:,0],
-                joint_positions[:,1],
-                joint_positions[:,2],
-                marker='o')
+    T0 = np.eye(4)
+    dh03 = [
+        [q1, l1, a1, -np.pi/2],
+        [q2, 0, l2, 0],
+        [q3 + np.pi/2, 0, 0, np.pi/2]
+    ]
+    for params in dh03:
+        T0 = T0 @ get_transform(*params)
+    R03 = T0[:3, :3]
 
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_zlabel("Z")
-        ax.set_title(title)
+    R36 = R03.T @ target_orient
 
-        # Auto scale
-        max_range = np.array([
-            joint_positions[:,0].max()-joint_positions[:,0].min(),
-            joint_positions[:,1].max()-joint_positions[:,1].min(),
-            joint_positions[:,2].max()-joint_positions[:,2].min()
-        ]).max() / 2.0
+    q5 = np.arctan2(np.sqrt(R36[0,2]**2 + R36[1,2]**2), R36[2,2])
 
-        mid_x = (joint_positions[:,0].max()+joint_positions[:,0].min()) * 0.5
-        mid_y = (joint_positions[:,1].max()+joint_positions[:,1].min()) * 0.5
-        mid_z = (joint_positions[:,2].max()+joint_positions[:,2].min()) * 0.5
+    if np.abs(R36[2, 2]) > 0.9999: 
+        q4 = 0
+        q6 = np.arctan2(R36[1,0], R36[0,0])
+    else:
+        q4 = np.arctan2(R36[1,2], R36[0,2])
+        q6 = np.arctan2(R36[2,1], -R36[2,0])
 
-        ax.set_xlim(mid_x - max_range, mid_x + max_range)
-        ax.set_ylim(mid_y - max_range, mid_y + max_range)
-        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+    return np.array([q1, q2, q3, q4, q5, q6]), reachable
 
-        plt.show()
 
- 
-def main():
-  '''Given a two degree of freedom robotic arm and a desired end position of the end effector,
-     calculate the two joint angles (i.e. servo angles).
-  '''
- 
-  # A 2D array that lists the different axes of rotation (rows) for each joint
-  # Here I assume our robotic arm has two joints, but you can add more if you like.
-  # k = kx, ky, kz 
-  k = np.array([[0,0,1],[0,0,1]])
-     
-  # A 2D array that lists the translations from the previous joint to the current joint
-  # The first translation is from the base frame to joint 1 (which is equal to the base frame)
-  # The second translation is from joint 1 to joint 2
-  # t = tx, ty, tz
-  # These values are measured with a ruler based on the kinematic diagram
-  # This tutorial teaches you how to draw kinematic diagrams:
-  # https://automaticaddison.com/how-to-assign-denavit-hartenberg-frames-to-robotic-arms/
-  a1 = 4.7
-  a2 = 5.9
-  a3 = 5.4
-  a4 = 6.0
-  t = np.array([[0,0,0],[a2,0,a1]])
- 
-  # Position of end effector in joint 2 (i.e. the last joint) frame
-  p_eff_2 = [a4,0,a3]
-     
-  # Create an object of the RoboticArm class
-  k_c = RoboticArm(k,t)
-   # Plot initial configuration
-  k_c.plot_arm(q_0, p_eff_N=p_eff_2, title="Initial Configuration")
+# ================= ROS Spin Thread =================
+rclpy.init()
+node = JointPublisher()
+ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+ros_thread.start()
 
-  # Starting joint angles in radians (joint 1, joint 2)
-  q_0 = np.array([0,0])
-     
-  # desired end position for the end effector with respect to the base frame of the robotic arm
-  endeffector_goal_position = np.array([4.0,10.0,a1 + a4])
- 
-  # Display the starting position of each joint in the global frame
-  for i in np.arange(0,k_c.N_joints):
-    print(f'joint {i} position = {k_c.position(q_0,index=i)}')
- 
-  print(f'end_effector = {k_c.position(q_0,index=-1,p_i=p_eff_2)}')
-  print(f'goal = {endeffector_goal_position}') 
- 
-  # Return joint angles that result in the end effector reaching endeffector_goal_position
-  final_q = k_c.pseudo_inverse(q_0, p_eff_N=p_eff_2, goal_position=endeffector_goal_position, max_steps=500)
-  # Plot final configuration
-  k_c.plot_arm(final_q, p_eff_N=p_eff_2, title="Final Configuration")
+# ================= Plot & UI Setup =================
+fig = plt.figure(figsize=(12, 9))
+plt.subplots_adjust(left=0.2, bottom=0.40)
+ax = fig.add_subplot(111, projection='3d')
 
-  # Final Joint Angles in degrees   
-  print('\n\nFinal Joint Angles in Degrees')
-  print(f'Joint 1: {np.degrees(final_q[0])} , Joint 2: {np.degrees(final_q[1])}')
- 
-if __name__ == '__main__':
-  main()
+init_x, init_y, init_z = (L2 + L3 + D6), 0.0, L1
+init_roll, init_pitch, init_yaw = 0, 90, 0
+init_base_y = 0.0
+
+ax_base_y = plt.axes([0.25, 0.33, 0.65, 0.03])
+ax_x      = plt.axes([0.25, 0.29, 0.65, 0.03])
+ax_y      = plt.axes([0.25, 0.25, 0.65, 0.03])
+ax_z      = plt.axes([0.25, 0.21, 0.65, 0.03])
+ax_roll   = plt.axes([0.25, 0.17, 0.65, 0.03])
+ax_pitch  = plt.axes([0.25, 0.13, 0.65, 0.03])
+ax_yaw    = plt.axes([0.25, 0.09, 0.65, 0.03])
+
+s_base_y = Slider(ax_base_y, 'Base Track Y', -1.0, 1.0, valinit=init_base_y, color='orange')
+s_x = Slider(ax_x, 'Local X', -1.0, 1.0, valinit=init_x)
+s_y = Slider(ax_y, 'Local Y', -1.0, 1.0, valinit=init_y)
+s_z = Slider(ax_z, 'Local Z', 0.0, 1.5, valinit=init_z)
+s_roll = Slider(ax_roll, 'Roll (deg)', -180, 180, valinit=init_roll)
+s_pitch = Slider(ax_pitch, 'Pitch (deg)', -180, 180, valinit=init_pitch)
+s_yaw = Slider(ax_yaw, 'Yaw (deg)', -180, 180, valinit=init_yaw)
+
+sliders = [s_base_y, s_x, s_y, s_z, s_roll, s_pitch, s_yaw]
+
+# ================= 🎛️ ปุ่ม (Button) =================
+# สร้างพื้นที่สำหรับปุ่ม (x, y, กว้าง, สูง)
+ax_button_reset = plt.axes([0.02, 0.35, 0.12, 0.05])
+ax_button_save = plt.axes([0.02, 0.20, 0.12, 0.05])
+# สร้างปุ่ม
+btn_reset = Button(ax_button_reset, 'RESET HOME', color='salmon', hovercolor='red')
+btn_run = Button(ax_button_save, 'Run Position', color='green', hovercolor='lime')
+
+def reset_home(event):
+    """ฟังก์ชันที่จะถูกรันเมื่อกดปุ่ม"""
+    print("Resetting to Home Position...")
+    s_base_y.set_val(init_base_y)
+    s_x.set_val(init_x)
+    s_y.set_val(init_y)
+    s_z.set_val(init_z)
+    s_roll.set_val(init_roll)
+    s_pitch.set_val(init_pitch)
+    s_yaw.set_val(init_yaw)
+    # ฟังก์ชัน set_val() จะไปเรียกฟังก์ชัน update() อัตโนมัติ ไม่ต้องเรียกซ้ำครับ
+
+def move_save(task):
+        tol = 1e-4
+        tar_q = task[:6]
+        slider = task[5]
+        cur_pose = np.array([s_x.val, s_y.val, s_z.val])
+        roll, pitch, yaw = np.radians(s_roll.val), np.radians(s_pitch.val), np.radians(s_yaw.val)
+        cur_orient = rpy_to_matrix(roll, pitch, yaw)
+        current_q = inverse_kinematics_6dof(cur_pose, cur_orient, L1, L2, L3, D6)
+        idle = False
+        step = 0.5*task[6]/100
+        T = forward_kinematics_visual(tar_q, L1, L2, L3, D6, J4_OFFSET_Y, slider)
+        T_end = T[-1]
+        x_s,y_s,z_s,roll_s,pitch_s,yaw_s = matrix_to_rpy(T_end)
+        s_base_y.set_val(slider)
+        s_x.set_val(x_s)
+        s_y.set_val(y_s)
+        s_z.set_val(z_s)
+        s_roll.set_val(roll_s)
+        s_pitch.set_val(pitch_s)
+        s_yaw.set_val(yaw_s)
+        node.publish_joints(tar_q, slider)
+        
+def run_pose(event):
+    path = '/home/isaac/ros2_ws/src/robot_arm/tasks/data.txt'
+    target_task = None
+        
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                loaded_data = json.load(f)
+                
+                # 🔥 เช็คความปลอดภัย: ต้องเป็น dict และมี key ชื่อ "tasks" เท่านั้นถึงจะใช้ต่อ
+                if isinstance(loaded_data, dict) and "tasks" in loaded_data:
+                    data = loaded_data
+                    
+                else:
+                    print("⚠️ Unknown format")
+        except json.JSONDecodeError:
+            pass
+        task_list = data.get('tasks',[])
+        if not task_list:
+            print("⚠️ โปรแกรมนี้ยังไม่มีข้อมูล Task")
+            return
+        else:
+            seq=len(task_list)
+            print(f"There're {seq} sequence")
+            
+            for i in task_list:
+                task=[]
+                print(f"seq: {i.get("sequence")} name:{i.get("label")}")
+                for j in range(1,6):
+                    task.append(i.get(f"j{j}"))
+                    print(f"moving q{j} to {task[j-1]}")
+                task.append(i.get("rail"))
+                task.append(i.get("speed"))
+                print(f"moving rail to {task[5]} with speed {task[6]} %")
+                move_save(task)
+                time.sleep(2)
+                    
+    
+        
+# ผูกฟังก์ชันเข้ากับการคลิกปุ่ม
+btn_reset.on_clicked(reset_home)
+btn_run.on_clicked(run_pose)
+# ==================================================
+
+labels = ["Base", "J1", "J2", "J3", "J4", "J5", "J6"]
+axes_visibility = [True] * 7 
+
+ax_check = plt.axes([0.02, 0.45, 0.12, 0.3], facecolor='#f0f0f0')
+check = CheckButtons(ax_check, labels, axes_visibility)
+
+def toggle_axes(label):
+    idx = labels.index(label)
+    axes_visibility[idx] = not axes_visibility[idx]
+    update(None)
+
+check.on_clicked(toggle_axes)
+
+def draw_axes(ax, T, length=0.08, label=""):
+    origin = T[:3, 3]
+    x_axis = T[:3, 0] * length
+    y_axis = T[:3, 1] * length
+    z_axis = T[:3, 2] * length
+
+    ax.quiver(*origin, *x_axis, color='r', linewidth=1.5)
+    ax.quiver(*origin, *y_axis, color='g', linewidth=1.5)
+    ax.quiver(*origin, *z_axis, color='b', linewidth=3.0) 
+    
+    if label:
+        offset_z = 0.02
+        if label in ["J3", "J5"]: offset_z = -0.04 
+        ax.text(origin[0], origin[1], origin[2] + offset_z, label, fontsize=9, fontweight='bold', color='black')
+
+def update(val):
+    ax.cla()
+
+    base_y = s_base_y.val
+    
+    local_target_pos = np.array([s_x.val, s_y.val, s_z.val])
+    r, p, y = np.radians(s_roll.val), np.radians(s_pitch.val), np.radians(s_yaw.val)
+    target_orient = rpy_to_matrix(r, p, y)
+
+    # คำนวณ IK ด้วยสมการบริสุทธิ์
+    joints, reachable = inverse_kinematics_6dof(local_target_pos, target_orient, L1, L2, L3, D6)
+    # 🔥 คำนวณกราฟิก FK ที่รวม J4 Offset + Track Y เลื่อนฐาน
+    T_list = forward_kinematics_visual(joints, L1, L2, L3, D6, J4_OFFSET_Y, base_y)
+    pts = np.array([T[:3, 3] for T in T_list])
+
+    ax.plot([0, 0], [-1.0, 1.0], [0, 0], '--', color='black', linewidth=3, alpha=0.5, label="Linear Track")
+    ax.plot(pts[:,0], pts[:,1], pts[:,2], '-o', color='#34495e', linewidth=4, alpha=0.8)
+
+    global_target_pos = local_target_pos + np.array([0, base_y, 0])
+    target_color = 'green' if reachable else 'red'
+    ax.scatter(global_target_pos[0], global_target_pos[1], global_target_pos[2], color=target_color, s=100, label="Target (Local)")
+    ax.scatter(pts[-1,0], pts[-1,1], pts[-1,2], color='purple', s=50, label="Visual Output (Offset)")
+
+    for i, T in enumerate(T_list):
+        if axes_visibility[i]:
+            draw_axes(ax, T, length=0.08, label=labels[i])
+
+    info_text = "Target is UNREACHABLE!" if not reachable else ""
+    ax.text2D(0.05, 0.95, info_text, transform=ax.transAxes, color='red', fontsize=14, fontweight='bold')
+
+    q_deg = np.degrees(joints)
+    angle_text = f"Track Y: {base_y:.2f} m\n\nClean Joints (to ROS):\n"
+    for i in range(6):
+        angle_text += f"q{i+1}: {joints[i]:.2f} rad ({q_deg[i]:.1f}°)\n"
+    ax.text2D(0.02, 0.65, angle_text, transform=ax.transAxes, fontsize=10, bbox=dict(facecolor='white', alpha=0.5))
+
+    node.publish_joints(joints, base_y)
+
+    ax.set_xlim([-1.0, 1.0]); ax.set_ylim([-1.0, 1.0]); ax.set_zlim([0, 1.5])
+    ax.set_xlabel('Global X'); ax.set_ylabel('Global Y'); ax.set_zlabel('Global Z')
+    ax.legend(loc="upper right")
+    ax.set_title("7-Axis System: Base Track + J4 Visual Offset")
+
+    fig.canvas.draw_idle()
+
+for s in sliders:
+    s.on_changed(update)
+
+
+    
+update(None)
+plt.show()
+
+rclpy.shutdown()

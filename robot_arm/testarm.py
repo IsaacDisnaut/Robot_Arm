@@ -14,26 +14,45 @@ from scipy.optimize import minimize
 # -------------------------
 # Rotation Utilities
 # -------------------------
+def rpy_to_matrix(roll, pitch, yaw):
+    Rx = np.array([
+        [1, 0, 0],
+        [0, np.cos(roll), -np.sin(roll)],
+        [0, np.sin(roll),  np.cos(roll)]
+    ])
+
+    Ry = np.array([
+        [np.cos(pitch),  0, np.sin(pitch)],
+        [0,              1, 0],
+        [-np.sin(pitch), 0, np.cos(pitch)]
+    ])
+
+    Rz = np.array([
+        [np.cos(yaw), -np.sin(yaw), 0],
+        [np.sin(yaw),  np.cos(yaw), 0],
+        [0,            0,           1]
+    ])
+
+    return Rz @ Ry @ Rx
+
+
 def matrix_to_rpy(R):
-    """สกัดมุม Roll, Pitch, Yaw จาก Rotation Matrix (Z-Y-X)"""
+    """แปลง Rotation Matrix กลับเป็นมุม Roll, Pitch, Yaw"""
     pitch = np.arctan2(-R[2, 0], np.sqrt(R[0, 0]**2 + R[1, 0]**2))
-    if np.abs(np.cos(pitch)) > 1e-6:
-        roll = np.arctan2(R[2, 1], R[2, 2])
-        yaw = np.arctan2(R[1, 0], R[0, 0])
+    
+    # เช็ค Singularity (Gimbal lock) เมื่อ Pitch หันขึ้น/ลง 90 องศา
+    if np.abs(pitch - np.pi/2) < 1e-6:
+        yaw = 0.0
+        roll = np.arctan2(R[0, 1], R[0, 2])
+    elif np.abs(pitch + np.pi/2) < 1e-6:
+        yaw = 0.0
+        roll = -np.arctan2(R[0, 1], R[0, 2])
     else:
-        roll = 0.0
-        yaw = np.arctan2(-R[0, 1], R[1, 1])
+        yaw = np.arctan2(R[1, 0], R[0, 0])
+        roll = np.arctan2(R[2, 1], R[2, 2])
+        
     return roll, pitch, yaw
 
-def get_R03(q1, q2, q3):
-    # ใช้ DH Parameter ที่คุณกำหนดใน Forward Kinematics
-    # [theta, d, a, alpha]
-    T01 = dh_matrix(q1 - np.pi/2, 0.28787, 0.02025, -np.pi/2)
-    T12 = dh_matrix(q2 - np.pi/2, 0.0,     0.26097, -np.pi/2)
-    T23 = dh_matrix(q3,           0.0,     0.0179,  -np.pi/2)
-    
-    T03 = T01 @ T12 @ T23
-    return T03[:3, :3] # ดึงเฉพาะส่วนการหมุน 3x3
 
 # -------------------------
 # 6 DOF Kinematics (DH Parameter Base)
@@ -59,7 +78,7 @@ def forward_kinematics(q):
         [q[2],           0.0,     0.0179,  -np.pi/2],   
         [q[3],           0.26075, 0.0,      np.pi/2],  
         [q[4],           0.07974, 0.0,     -np.pi/2],   
-        [0,           0.00,   0.0,      0.0]        
+        [q[5],           0.001,   0.0,      0.0]        
     ]
 
     T_end_effector = np.eye(4)
@@ -74,47 +93,67 @@ def forward_kinematics(q):
     
     # ดึง Rotation Matrix แล้วแปลงกลับเป็น RPY
     R = T_end_effector[:3, :3]
-    roll, pitch, yaw = rpy_to_matrix(R)
+    roll, pitch, yaw = matrix_to_rpy(R)
     
     return x, y, z, roll, pitch, yaw
 
 def solve_ik(x, y, z, roll, pitch, yaw):
-    # 1. รับ Target
-    R_target = rpy_to_matrix(roll, pitch, yaw)
-    P_ee = np.array([x, y, z])
+    """
+    Geometric IK 6DOF (3 position + 3 orientation)
+    ใช้ DH parameter ชุดเดียวกับ forward_kinematics()
+    """
 
-    # 2. ค้นหา Wrist Center (WC)
-    d5 = 0.07974 # ระยะจากข้อมือถึงปลายตาม DH
-    P_wc = P_ee - d5 * R_target[:, 2]
-    xc, yc, zc = P_wc
+    # ===== DH ค่าคงที่ =====
+    d1 = 0.28787
+    a2 = 0.26097
+    a3 = 0.0179
+    d4 = 0.26075
+    d5 = 0.07974
+    d6 = 0.001
 
-    # 3. Inverse Position (Geometric)
-    # q1: Base
-    q1 = np.arctan2(yc, xc) + np.pi/2 # ปรับ offset คืนตาม DH
+    # ----- 1) หา Wrist Center -----
+    R06 = rpy_to_matrix(roll, pitch, yaw)
+    p = np.array([-y, x, z])
+    wc = p - d6 * R06[:, 2]
 
-    # q2, q3: Arm (Law of Cosines)
-    r = np.sqrt(xc**2 + yc**2) - 0.02025 # ลบ a0
-    h = zc - 0.28787                     # ลบ d1
-    S = np.sqrt(r**2 + h**2)
-    L1, L2 = 0.26097, 0.26075            # a1 และ d4
+    wx, wy, wz = wc
 
-    cos_q3 = (S**2 - L1**2 - L2**2) / (2 * L1 * L2)
-    q3 = -np.arccos(np.clip(cos_q3, -1.0, 1.0))
+    # ----- 2) Solve q1 -----
+    q1 = np.arctan2(wy, wx)
 
-    alpha_angle = np.arctan2(h, r)
-    beta_angle = np.arctan2(L2 * np.sin(abs(q3)), L1 + L2 * np.cos(q3))
-    q2 = (alpha_angle + beta_angle) + np.pi/2 # ปรับ offset คืนตาม DH
+    # ----- 3) Solve q2, q3 -----
+    r = np.sqrt(wx**2 + wy**2) - 0.02025
+    s = wz - d1
 
-    # 4. Inverse Orientation
-    R03 = get_R03(q1, q2, q3)
-    R36 = R03.T @ R_target
-    
-    # สกัดมุมข้อมือ (Euler Z-Y-Z สำหรับ Spherical Wrist)
+    D = (r**2 + s**2 - a2**2 - d4**2) / (2 * a2 * d4)
+    D = np.clip(D, -1.0, 1.0)
+
+    q3 = np.arctan2(np.sqrt(1 - D**2), D)   # elbow-down
+
+    q2 = np.arctan2(s, r) - np.arctan2(d4*np.sin(q3), a2 + d4*np.cos(q3))
+
+    # ----- 4) Orientation part -----
+    # คำนวณ R03 จาก DH จริง
+    T01 = dh_matrix(q1 - np.pi/2, d1, 0.02025, -np.pi/2)
+    T12 = dh_matrix(q2 - np.pi/2, 0, a2, -np.pi/2)
+    T23 = dh_matrix(q3, 0, a3, -np.pi/2)
+
+    T03 = T01 @ T12 @ T23
+    R03 = T03[:3, :3]
+
+    R36 = R03.T @ R06
+
     q5 = np.arccos(np.clip(R36[2, 2], -1.0, 1.0))
-    q4 = np.arctan2(R36[1, 2], R36[0, 2])
-    q6 = np.arctan2(R36[2, 1], -R36[2, 0])
 
-    return [float(q1), float(q2), float(q3), float(q4), float(q5), float(q6)]
+    if abs(q5) > 1e-6:
+        q4 = np.arctan2(R36[1, 2], R36[0, 2])
+        q6 = np.arctan2(R36[2, 1], -R36[2, 0])
+    else:
+        q4 = 0.0
+        q6 = np.arctan2(-R36[0, 1], R36[0, 0])
+
+    return [q1- np.pi/2, q2- np.pi/2, q3- np.pi/2, -q4, q5, -q6]
+
 # -------------------------
 # ROS2 Publisher
 # -------------------------
@@ -277,7 +316,7 @@ class IKWindow(QWidget):
         for l in labels:
             layout.addWidget(QLabel(l))
             inp = QLineEdit()
-            inp.setText("0.2")                       
+            inp.setText("0")                       
             inp.editingFinished.connect(self.ensure_not_empty)
             inp.editingFinished.connect(self.compute)
             layout.addWidget(inp)

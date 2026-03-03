@@ -16,8 +16,9 @@ class JointPublisher(Node):
     def publish_joints(self, joints, base_y):
         joint_msg = JointState()
         joint_msg.header.stamp = self.get_clock().now().to_msg()
+        # 🔥 เพิ่มชื่อแกนรางเลื่อน (track_y) เข้าไปเป็นแกนที่ 7
         joint_msg.name = [
-            'slider_joint', 'joint_1', 'joint_2', 'joint_3',
+            'track_y', 'joint_1', 'joint_2', 'joint_3',
             'joint_4', 'joint_5', 'joint_6'
         ]
         joint_msg.position = [float(base_y)] + [float(q) for q in joints]
@@ -26,8 +27,6 @@ class JointPublisher(Node):
 # ================= Robot Params =================
 L1, L2, L3 = 0.28787, 0.26096, 0.26136
 D6 = 0.07074
-# 🔥 กำหนดระยะ Offset ของ J4 สำหรับวาดกราฟ
-J4_OFFSET_Y = 0.02175 
 
 # ================= Math & Kinematics =================
 def rpy_to_matrix(roll, pitch, yaw):
@@ -44,27 +43,20 @@ def get_transform(theta, d, a, alpha):
         [0,              0,                            0,                           1]
     ])
 
-# 🔥 ฟังก์ชันที่ใช้วาดกราฟิกโดยเฉพาะ (มี J4 Offset + Base Track Y)
-def forward_kinematics_visual(q, l1, l2, l3, d6, offset_y, base_y=0.0):
+def forward_kinematics_matrices(q, l1, l2, l3, d6, base_y=0.0):
     q1, q2, q3, q4, q5, q6 = q
-    a1 =0.020885
-    # คำนวณมุมและระยะทแยงที่เกิดจากการยก J4 สูงขึ้น
-    gamma = np.arctan2(offset_y, l3)
-    l3_eff = np.sqrt(l3**2 + offset_y**2)
     
     dh_params = [
-        [q1,           l1, a1,  -np.pi/2], 
+        [q1,           l1, 0,  -np.pi/2], 
         [q2,           0,  l2,  0      ], 
-        # 🔥 กราฟิก: J3 หมุนเงยขึ้นหลบโครงสร้าง (ใส่เครื่องหมายลบ)
-        [q3 + np.pi/2 - gamma, 0,  0,   np.pi/2], 
-        # 🔥 กราฟิก: ระยะ L3 ยืดออกเป็นเส้นทแยงมุม
-        [q4,           l3_eff, 0,  -np.pi/2], 
-        [q5+gamma,           0,  0,   np.pi/2], 
+        [q3 + np.pi/2, 0,  0,   np.pi/2], 
+        [q4,           l3, 0,  -np.pi/2], 
+        [q5,           0,  0,   np.pi/2], 
         [q6,           d6, 0,   0      ]  
     ]
     
     T = np.eye(4)
-    # 🔥 เลื่อนฐานหุ่นยนต์ไปตามรางแกน Y
+    # 🔥 เลื่อนฐานของหุ่นยนต์ไปตามแนวแกน Y ของโลก
     T[1, 3] = base_y 
     
     T_list = [T.copy()]
@@ -73,10 +65,9 @@ def forward_kinematics_visual(q, l1, l2, l3, d6, offset_y, base_y=0.0):
         T_list.append(T.copy())
     return T_list
 
-# ฟังก์ชัน IK หลัก (ไม่มีออฟเซ็ต คลีน 100%)
-def inverse_kinematics_6dof(local_target_pos, target_orient, l1, l2, l3, d6):
-    xc, yc, zc = local_target_pos - d6 * target_orient[:, 2]
-    a1=0.020885
+def inverse_kinematics_6dof(target_pos, target_orient, l1, l2, l3, d6):
+    xc, yc, zc = target_pos - d6 * target_orient[:, 2]
+
     q1 = np.arctan2(yc, xc)
 
     r = np.sqrt(xc**2 + yc**2)
@@ -98,7 +89,7 @@ def inverse_kinematics_6dof(local_target_pos, target_orient, l1, l2, l3, d6):
 
     T0 = np.eye(4)
     dh03 = [
-        [q1, l1, a1, -np.pi/2],
+        [q1, l1, 0, -np.pi/2],
         [q2, 0, l2, 0],
         [q3 + np.pi/2, 0, 0, np.pi/2]
     ]
@@ -128,13 +119,14 @@ ros_thread.start()
 
 # ================= Plot & UI Setup =================
 fig = plt.figure(figsize=(12, 9))
-plt.subplots_adjust(left=0.2, bottom=0.40)
+plt.subplots_adjust(left=0.2, bottom=0.40) # ขยายพื้นที่ด้านล่างเพื่อใส่ Slider รางเลื่อน
 ax = fig.add_subplot(111, projection='3d')
 
 init_x, init_y, init_z = (L2 + L3 + D6), 0.0, L1
 init_roll, init_pitch, init_yaw = 0, 90, 0
 init_base_y = 0.0
 
+# 🔥 เพิ่ม Slider รางเลื่อนฐานหุ่นยนต์ (Base Y Track)
 ax_base_y = plt.axes([0.25, 0.33, 0.65, 0.03])
 ax_x      = plt.axes([0.25, 0.29, 0.65, 0.03])
 ax_y      = plt.axes([0.25, 0.25, 0.65, 0.03])
@@ -143,10 +135,11 @@ ax_roll   = plt.axes([0.25, 0.17, 0.65, 0.03])
 ax_pitch  = plt.axes([0.25, 0.13, 0.65, 0.03])
 ax_yaw    = plt.axes([0.25, 0.09, 0.65, 0.03])
 
+# Slider สีพิเศษเพื่อให้เห็นชัดว่าเป็นรางเลื่อน
 s_base_y = Slider(ax_base_y, 'Base Track Y', -1.0, 1.0, valinit=init_base_y, color='orange')
-s_x = Slider(ax_x, 'Local X', -1.0, 1.0, valinit=init_x)
-s_y = Slider(ax_y, 'Local Y', -1.0, 1.0, valinit=init_y)
-s_z = Slider(ax_z, 'Local Z', 0.0, 1.5, valinit=init_z)
+s_x = Slider(ax_x, 'Target X', -1.0, 1.0, valinit=init_x)
+s_y = Slider(ax_y, 'Target Y', -1.0, 1.0, valinit=init_y)
+s_z = Slider(ax_z, 'Target Z', 0.0, 1.5, valinit=init_z)
 s_roll = Slider(ax_roll, 'Roll (deg)', -180, 180, valinit=init_roll)
 s_pitch = Slider(ax_pitch, 'Pitch (deg)', -180, 180, valinit=init_pitch)
 s_yaw = Slider(ax_yaw, 'Yaw (deg)', -180, 180, valinit=init_yaw)
@@ -185,25 +178,27 @@ def update(val):
     ax.cla()
 
     base_y = s_base_y.val
-    
-    local_target_pos = np.array([s_x.val, s_y.val, s_z.val])
+    target_pos = np.array([s_x.val, s_y.val, s_z.val])
     r, p, y = np.radians(s_roll.val), np.radians(s_pitch.val), np.radians(s_yaw.val)
     target_orient = rpy_to_matrix(r, p, y)
 
-    # คำนวณ IK ด้วยสมการบริสุทธิ์
+    # 🔥 หักลบระยะรางเลื่อน เพื่อให้ IK คำนวณเสมือนว่าเป้าหมายเคลื่อนเข้ามาหาฐานแทน
+    local_target_pos = target_pos - np.array([0, base_y, 0])
+
     joints, reachable = inverse_kinematics_6dof(local_target_pos, target_orient, L1, L2, L3, D6)
     
-    # 🔥 คำนวณกราฟิก FK ที่รวม J4 Offset + Track Y เลื่อนฐาน
-    T_list = forward_kinematics_visual(joints, L1, L2, L3, D6, J4_OFFSET_Y, base_y)
+    T_list = forward_kinematics_matrices(joints, L1, L2, L3, D6, base_y)
     pts = np.array([T[:3, 3] for T in T_list])
 
-    ax.plot([0, 0], [-1.0, 1.0], [0, 0], '--', color='black', linewidth=3, alpha=0.5, label="Linear Track")
+    # วาดรางเลื่อน (Linear Track) เส้นประสีดำ
+    ax.plot([0, 0], [-1.0, 1.0], [0, 0], '--', color='black', linewidth=3, alpha=0.5, label="Linear Track (Y)")
+    
+    # วาดเส้นแขนกล
     ax.plot(pts[:,0], pts[:,1], pts[:,2], '-o', color='#34495e', linewidth=4, alpha=0.8)
 
-    global_target_pos = local_target_pos + np.array([0, base_y, 0])
     target_color = 'green' if reachable else 'red'
-    ax.scatter(global_target_pos[0], global_target_pos[1], global_target_pos[2], color=target_color, s=100, label="Target (Local)")
-    ax.scatter(pts[-1,0], pts[-1,1], pts[-1,2], color='purple', s=50, label="Visual Output (Offset)")
+    ax.scatter(target_pos[0], target_pos[1], target_pos[2], color=target_color, s=100, label="Target Input")
+    ax.scatter(pts[-1,0], pts[-1,1], pts[-1,2], color='purple', s=50, label="Real IK Output")
 
     for i, T in enumerate(T_list):
         if axes_visibility[i]:
@@ -213,17 +208,18 @@ def update(val):
     ax.text2D(0.05, 0.95, info_text, transform=ax.transAxes, color='red', fontsize=14, fontweight='bold')
 
     q_deg = np.degrees(joints)
-    angle_text = f"Track Y: {base_y:.2f} m\n\nClean Joints (to ROS):\n"
+    angle_text = f"Track Y: {base_y:.2f} m\n\nCalculated Joints:\n"
     for i in range(6):
         angle_text += f"q{i+1}: {joints[i]:.2f} rad ({q_deg[i]:.1f}°)\n"
     ax.text2D(0.02, 0.65, angle_text, transform=ax.transAxes, fontsize=10, bbox=dict(facecolor='white', alpha=0.5))
 
+    # ส่งค่าเข้า ROS 2 (รวมแกน Track Y ด้วย)
     node.publish_joints(joints, base_y)
 
     ax.set_xlim([-1.0, 1.0]); ax.set_ylim([-1.0, 1.0]); ax.set_zlim([0, 1.5])
-    ax.set_xlabel('Global X'); ax.set_ylabel('Global Y'); ax.set_zlabel('Global Z')
+    ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
     ax.legend(loc="upper right")
-    ax.set_title("7-Axis System: Base Track + J4 Visual Offset")
+    ax.set_title("7-DOF IK System: 6-Axis Robot on a Linear Track")
 
     fig.canvas.draw_idle()
 

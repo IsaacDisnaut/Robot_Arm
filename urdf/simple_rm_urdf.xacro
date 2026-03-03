@@ -1,19 +1,14 @@
 <?xml version="1.0" ?>
-<robot name="arctos" xmlns:xacro="http://www.ros.org/wiki/xacro">
+<robot name="arctos_urdf" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
 <xacro:include filename="$(find arctos_description)/urdf/materials.xacro" />
 <xacro:include filename="$(find robot_arm)/urdf/simple_arm.trans" />
 <xacro:include filename="$(find arctos_description)/urdf/arctos_urdf.gazebo" />
-
-<material name="paint_metallic_blue_2">
-  <color rgba="0.2 0.2 0.8 1.0"/>
-</material>
-
 <link name="world"/>
 <joint name="world_to_slider" type="fixed">
     <parent link="world"/>
     <child link="slider_link"/>
-    <origin xyz="0 0 0" rpy="3.1416 -1.5708 0"/>
+    <origin xyz="0 0 0" rpy="0 0 "/>
 </joint>
 
 <link name="slider_link">
@@ -23,7 +18,7 @@
         <inertia ixx="0.1" iyy="1.0" izz="1.0" ixy="0" iyz="0" ixz="0"/>
     </inertial>
     <visual>
-        <origin xyz="0 -0.26 0.111" rpy="0 0 -1.5708"/>
+        <origin xyz="0 0 -0.5" rpy="0 0 0"/>
         <geometry>
             <mesh filename="package://arctos_description/meshes/slider_link.stl" scale="0.001 0.001 0.001"/>
         </geometry>
@@ -44,7 +39,7 @@
         <inertia ixx="0.05" iyy="0.05" izz="0.05" ixy="0" iyz="0" ixz="0"/>
     </inertial>
     <visual>
-        <origin xyz="-0.01 -0.245 0.1" rpy="0 0 -1.5708"/>
+        <origin xyz="-0.0 -0 0" rpy="0 0 0"/>
         <geometry>
             <mesh filename="package://arctos_description/meshes/slider_1.stl" scale="0.001 0.001 0.001"/>
         </geometry>
@@ -62,14 +57,14 @@
 <joint name="slider_joint" type="prismatic">
     <parent link="slider_link"/>
     <child link="slider_1"/>
-    <origin xyz="0 0 0.05" rpy="0 0 0"/>
+    <origin xyz="0 0 0.0" rpy="0 0 0"/>
     <axis xyz="1 0 0"/> <limit lower="0" upper="0.8" effort="1000" velocity="1.0"/> 
 </joint>
 
 <joint name="base_joint" type="fixed">
     <parent link="slider_1"/>
     <child link="base_link"/>
-    <origin xyz="0 0 0.2" rpy="0 0 0"/> </joint>
+    <origin xyz="0 0 0" rpy="0 0 0"/> </joint>
 
 <link name="base_link">
   <inertial>
@@ -225,13 +220,13 @@
     <inertia ixx="5.2e-05" iyy="0.000103" izz="5.2e-05" ixy="-0.0" iyz="0.0" ixz="0.0"/>
   </inertial>
   <visual>
-    <origin xyz="-0.570316 0 0.313762" rpy="1.5708 0 1.5708"/>
+    <origin xyz="-0.570316 0 -.313762" rpy="1.5708 0 1.5708"/>
     <geometry>
       <mesh filename="package://arctos_description/meshes/Link_6_1.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="paint_metallic_blue_2"/>
   </visual>
-  <collision>0.000193 0.313762 -0.570316
+  <collision><!-- 0.000193 0.313762 -0.570316 -->
     <origin xyz="-0.570316 0 0.313762" rpy="0 0 0"/>
     <geometry>
       <mesh filename="package://arctos_description/meshes/Link_6_1.stl" scale="0.001 0.001 0.001"/>
@@ -280,39 +275,44 @@
     </geometry>
   </collision>
 </link>
-<joint name="joint_1" type="continuous">
+<joint name="joint_1" type="revolute">
   <origin xyz="0.0 0.000529 0.111" rpy="0 0 -1.5708"/>
   <parent link="base_link"/>
   <child link="Link_1_1"/>
-  <axis xyz="-0.0 0.0 1.0"/>
+  <axis xyz="0 0 1"/>
+  <limit lower="-4.7124" upper="1.5708" effort="100" velocity="1.0"/>
 </joint>
 
-<joint name="joint_2" type="continuous">
+<joint name="joint_2" type="revolute">
   <origin xyz="-0 -0.020885 0.178378" rpy="-1.5708 0 -1.5708"/>
   <parent link="Link_1_1"/>
   <child link="Link_2_1"/>
-  <axis xyz="0.0 -0.0 1.0"/>
+  <axis xyz="0 0 1"/>
+  <limit lower="-3.1416" upper="0.0" effort="100" velocity="1.0"/>
 </joint>
-<!-- 0.10013 0.001311 0.261007 -->
-<joint name="joint_3" type="continuous">
+
+<joint name="joint_3" type="revolute">
   <origin xyz="0 -0.261007 0" rpy="0 0 -1.5708"/>
   <parent link="Link_2_1"/>
   <child link="Link_3_1"/>
-  <axis xyz="0.0 0.0 1.0"/>
+  <axis xyz="0 0 1"/>
+  <limit lower="-4.1888" upper="1.0472" effort="100" velocity="1.0"/>
 </joint>
-<!-- -0.042999 -0.139695 0.021705 -->
-<joint name="joint_4" type="continuous">
+
+<joint name="joint_4" type="revolute">
   <origin xyz="0.021705 0.139695 0" rpy="1.5708 3.1416 3.1416"/>
   <parent link="Link_3_1"/>
   <child link="Link_4_1"/>
-  <axis xyz="-0.0 0.0 1.0"/>
+  <axis xyz="0 0 1"/>
+  <limit lower="-3.1416" upper="3.1416" effort="100" velocity="1.0"/>
 </joint>
-<!-- -0.039012 -0.121187 -0.001774 -->
-<joint name="joint_5" type="continuous">
+
+<joint name="joint_5" type="revolute">
   <origin xyz="0.009733 0 0.121187" rpy="1.5708 0 0"/>
   <parent link="Link_4_1"/>
   <child link="Link_5_1"/>
-  <axis xyz="0.0 -0.0 1.0"/>
+  <axis xyz="0 0 1"/>
+  <limit lower="-2.0944" upper="2.0944" effort="100" velocity="1.0"/>
 </joint>
 
 <joint name="gripper" type="fixed">
@@ -320,19 +320,20 @@
   <parent link="Link_6_1"/>
   <child link="Gripper_1"/>
 </joint>
-<!-- 0.039204 -0.033835 0.0 -->
-<joint name="joint_6" type="continuous">
+
+<joint name="joint_6" type="revolute">
   <origin xyz="0 0.039204 0" rpy="-1.5708 0 0"/>
   <parent link="Link_5_1"/>
   <child link="Link_6_1"/>
-  <axis xyz="-0.0 0.0 1.0"/>
+  <axis xyz="0 0 1"/>
+  <limit lower="-6.2832" upper="6.2832" effort="100" velocity="1.0"/>
 </joint>
 
 <joint name="jaw1" type="prismatic">
   <origin xyz="0.007741 0.039998 0.029551" rpy="0 0 0"/>
   <parent link="Gripper_1"/>
   <child link="Left_jaw_1"/>
-  <axis xyz="-0.0 -1.0 -0.0"/>
+  <axis xyz="0 -1 0"/>
   <limit upper="0.015" lower="0.0" effort="100" velocity="100"/>
 </joint>
 
@@ -340,11 +341,7 @@
   <origin xyz="0.007741 -0.039998 0.029551" rpy="0 0 0"/>
   <parent link="Gripper_1"/>
   <child link="Right_jaw_1"/>
-  <axis xyz="0.0 1.0 0.0"/>
+  <axis xyz="0 1 0"/>
   <limit upper="0.015" lower="0.0" effort="100" velocity="100"/>
 </joint>
-
-<xacro:include filename="$(find arctos_hardware_interface)/ros2_control/arctos.ros2_control.xacro" />
-<xacro:arctos_ros2_control name="arctos"/>
-
 </robot>

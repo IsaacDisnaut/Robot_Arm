@@ -6,6 +6,8 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
+        - /TF1
+        - /TF1/Frames1
         - /RobotModel1
       Splitter Ratio: 0.5
     Tree Height: 542
@@ -52,27 +54,29 @@ Visualization Manager:
       Enabled: true
       Filter (blacklist): ""
       Filter (whitelist): ""
-      Frame Timeout: 15
+      Frame Timeout: 1e+07
       Frames:
-        All Enabled: true
-        Gripper_1:
-          Value: true
-        Link_1_1:
-          Value: true
-        Link_2_1:
-          Value: true
-        Link_3_1:
-          Value: true
-        Link_4_1:
-          Value: true
-        Link_5_1:
-          Value: true
-        Link_6_1:
-          Value: true
+        All Enabled: false
         base_link:
+          Value: false
+        ee_link:
+          Value: false
+        link_1:
+          Value: false
+        link_2:
+          Value: false
+        link_3:
+          Value: false
+        link_4:
           Value: true
+        link_5:
+          Value: false
+        slider_1:
+          Value: false
+        slider_link:
+          Value: false
         world:
-          Value: true
+          Value: false
       Marker Scale: 1
       Name: TF
       Show Arrows: true
@@ -80,21 +84,22 @@ Visualization Manager:
       Show Names: false
       Tree:
         world:
-          base_link:
-            Link_1_1:
-              Link_2_1:
-                Link_3_1:
-                  Link_4_1:
-                    Link_5_1:
-                      Link_6_1:
-                        Gripper_1:
-                          {}
+          slider_link:
+            slider_1:
+              base_link:
+                link_1:
+                  link_2:
+                    link_3:
+                      link_4:
+                        link_5:
+                          ee_link:
+                            {}
       Update Interval: 0
       Value: true
     - Alpha: 1
       Class: rviz_default_plugins/RobotModel
       Collision Enabled: false
-      Description File: /home/isaac/ros2_ws/src/robot_arm/urdf/simple_rm_urdf.xacro
+      Description File: /home/isaac/ros2_ws/src/robot_arm/urdf/slider_arm.urdf
       Description Source: File
       Description Topic:
         Depth: 5
@@ -108,53 +113,48 @@ Visualization Manager:
         Expand Joint Details: false
         Expand Link Details: false
         Expand Tree: false
-        Gripper_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        Left_jaw_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
         Link Tree Style: Links in Alphabetic Order
-        Link_1_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        Link_2_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        Link_3_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        Link_4_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        Link_5_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        Link_6_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        Right_jaw_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
         base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        ee_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_3:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_4:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        link_5:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        slider_1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        slider_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
@@ -174,7 +174,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: slider_link
+    Fixed Frame: world
     Frame Rate: 30
   Name: root
   Tools:
@@ -217,25 +217,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.8979061841964722
+      Distance: 1.8093245029449463
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0
-        Y: 0
-        Z: 0
+        X: 0.5354756712913513
+        Y: -0.060449518263339996
+        Z: 0.48764148354530334
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5353982448577881
+      Pitch: 0.46539729833602905
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 0.8253979682922363
+      Yaw: 1.0354015827178955
     Saved: ~
 Window Geometry:
   Displays:
@@ -253,5 +253,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1200
-  X: 377
-  Y: 118
+  X: 94
+  Y: 154

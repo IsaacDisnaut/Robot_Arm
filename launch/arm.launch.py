@@ -10,7 +10,7 @@ def generate_launch_description():
     urdf = os.path.join(
         get_package_share_directory('robot_arm'),
         'urdf',
-        'simple_rm_urdf.xacro'
+        'slider_arm.urdf'
     )
 
     return LaunchDescription([
