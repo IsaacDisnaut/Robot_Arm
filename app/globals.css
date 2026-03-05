@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-apple: #f5f5f7;
+  --color-card-apple: #ffffff;
+  --color-accent-tesla: #0071e3;
+  --color-text-main: #1d1d1f;
+}
+
+@layer base {
+  body {
+    @apply bg-[#F5F5F7] text-[#1D1D1F];
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial,
+      sans-serif;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+}
+
+@layer components {
+  .tesla-card {
+    @apply bg-white rounded-[32px] shadow-sm border border-black/5;
+  }
+
+  .apple-btn {
+    @apply px-8 py-4 rounded-full font-bold transition-all active:scale-95 disabled:opacity-50 inline-flex items-center justify-center;
+  }
+}
+
+@layer utilities {
+  /* Safety status border animations */
+  @keyframes safety-warn-pulse {
+    0%, 100% {
+      box-shadow:
+        inset 0 0 0 5px rgba(249, 115, 22, 1),
+        inset 0 0 40px rgba(249, 115, 22, 0.15);
+    }
+    50% {
+      box-shadow:
+        inset 0 0 0 5px rgba(249, 115, 22, 0.55),
+        inset 0 0 70px rgba(249, 115, 22, 0.3);
+    }
+  }
+
+  @keyframes safety-emergency-pulse {
+    0%, 100% {
+      box-shadow:
+        inset 0 0 0 9px rgba(239, 68, 68, 1),
+        inset 0 0 80px rgba(239, 68, 68, 0.45);
+    }
+    50% {
+      box-shadow:
+        inset 0 0 0 9px rgba(239, 68, 68, 0.45),
+        inset 0 0 140px rgba(239, 68, 68, 0.6);
+    }
+  }
+
+  @keyframes safety-strip-flash {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.75; }
+  }
+
+  .safety-frame-warn {
+    animation: safety-warn-pulse 2s ease-in-out infinite;
+  }
+
+  .safety-frame-emergency {
+    animation: safety-emergency-pulse 0.55s ease-in-out infinite;
+  }
+
+  .safety-strip-flash {
+    animation: safety-strip-flash 0.55s ease-in-out infinite;
+  }
+
+  @keyframes splash {
+    0% {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  @keyframes line {
+    0% {
+      width: 0;
+    }
+    100% {
+      width: 100%;
+    }
+  }
+
+  .animate-splash {
+    animation: splash 0.5s ease-out forwards;
+  }
+
+  .animate-line {
+    animation: line 2s ease-out 0.5s forwards;
+  }
+}

@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Job {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String?
+  tasks       Task[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Task {
+  id        Int      @id @default(autoincrement())
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  jobId     Int
+  sequence  Int
+  label     String?
+
+  // Joint positions (6 axes) and rail position
+  j1        Float
+  j2        Float
+  j3        Float
+  j4        Float
+  j5        Float
+  j6        Float
+  rail      Float
+
+  // Settings
+  speed       Int    @default(50)
+  delay       Int    @default(0)
+  gripper     Int    @default(0)
+  controlMode String @default("joint")  // "joint" | "effector"
+
+  // Cartesian end-effector pose (captured at teach time, used for IK in effector mode)
+  x     Float?  // End-effector X in mm
+  y     Float?  // End-effector Y in mm
+  z     Float?  // End-effector Z in mm
+  roll  Float?  // Roll in degrees
+  pitch Float?  // Pitch in degrees
+  yaw   Float?  // Yaw in degrees
+
+  createdAt DateTime @default(now())
+}
