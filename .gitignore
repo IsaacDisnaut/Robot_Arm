@@ -1,0 +1,8 @@
+.vscode/
+node_modules/
+.next/
+.env
+*.db
+build/
+install/
+log/
