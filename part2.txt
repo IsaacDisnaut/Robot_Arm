@@ -1,0 +1,1 @@
+{UNSTACK(C,A),Putdown(C),UNSTACK(A,B),Putdown(A),PICKUP(B),STACK(B,C),PICKUP(A),STACK(A,B)}
