@@ -82,13 +82,16 @@ class RobotVelocityKinematics:
 class JointPublisher(Node):
     def __init__(self):
         super().__init__('ik_joint_publisher')
-        self.publisher = self.create_publisher(JointState, '/joint_states', 10)
+        self.publisher = self.create_publisher(JointState, '/motor', 10)
         self.subscription = self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
         self.tasksub = self.create_subscription(String, '/goto_position', self.taskcb, 10)
         self.force_sub = self.create_subscription(WrenchStamped, '/force_sensor', self.force_cb, 10)
         self.current_action = self.create_subscription(String, '/current_action', self.current_action, 10)
-        self.safety_status = self.create_subscription(Int8, '/safety_status', self.camsafe_cb, 10)
-        self.robot_status = self.create_subscription(Int8, '/robot_status', self.botstatus_cb, 10)
+        self.safety_status = 0
+        self.robot_status = 0
+        self.last_act = ""
+        self.safety_status_sub = self.create_subscription(Int8, '/safety_status', self.camsafe_cb, 10)
+        self.robot_status_sub = self.create_subscription(Int8, '/robot_status', self.botstatus_cb, 10)
         
         self.machine_state_pub = self.create_publisher(Int8, '/machine_state', 10)
         self.ee_pose_pub = self.create_publisher(Pose, '/ee_pose', 10)
@@ -829,27 +832,26 @@ def run_pose(task):
         speed = i.get('speed', 100)
         delay = i.get('delay')
         gripper = i.get('gripper', 0)
-        control_mode = i.get('control_mode')
-        controlMode = i.get('controlMode')
+        active_control_mode = i.get('control_mode', i.get('controlMode'))
         pose_cmd.extend([rail, speed, gripper])
-        print(f"moving rail to {rail} | speed {speed}% | gripper {gripper} with delay {delay} in {control_mode}")
+        print(f"moving rail to {rail} | speed {speed}% | gripper {gripper} with delay {delay} in {active_control_mode}")
         
-        print(f"Move in {control_mode}")
+        print(f"Move in {active_control_mode}")
         print(i)
         if label == "jog":
-            if controlMode == 'effector' and node.current_machine_state != 1:
+            if active_control_mode == 'effector' and node.current_machine_state != 1:
                 instant_jog_task(i)
-            elif controlMode == 'joint' and node.current_machine_state != 1:
+            elif active_control_mode == 'joint' and node.current_machine_state != 1:
                 instant_jog_joint(i)        
             else:
                 print("Busy or Unknown Control mode")
         else: 
-            if control_mode == 'effector' and node.current_machine_state != 1:
+            if active_control_mode == 'effector' and node.current_machine_state != 1:
                 move_save_ee(pose_cmd)
-            elif control_mode == 'joint' and node.current_machine_state != 1:
+            elif active_control_mode == 'joint' and node.current_machine_state != 1:
                 move_save(pose_cmd)        
             else:
-                print(f"{control_mode} ,{node.current_machine_state}")
+                print(f"{active_control_mode} ,{node.current_machine_state}")
                 print("Busy or Unknown Control mode")
 
 # ================= Main Execution =================
