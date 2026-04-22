@@ -187,7 +187,9 @@ class JointPublisher(Node):
 
         K_linear = 0.02  
         K_angular = 0.05 
-        
+        # [เพิ่มพารามิเตอร์] ความเร็วในการหันหน้าแกน Z เข้าหาทิศทางการเดิน
+        K_align = 0.5 
+
         V_target_linear_ee = force_vector_ee[0:3] * K_linear
         V_target_angular_ee = force_vector_ee[3:6] * K_angular
 
@@ -198,17 +200,45 @@ class JointPublisher(Node):
         T_ee = T_cur_list[-1]
         R_ee = T_ee[:3, :3] 
 
+        # 1. คำนวณความเร็วเชิงเส้นใน Base Frame
         V_target_linear_base = R_ee @ V_target_linear_ee
+        
+        # 2. คำนวณความเร็วเชิงมุมใน Base Frame (จากค่า Torque เดิม)
         V_target_angular_base = R_ee @ V_target_angular_ee
+
+        # ================= ส่วนที่เพิ่มใหม่ =================
+        # หาขนาดความเร็วบนระนาบ XY
+        v_norm_xy = np.linalg.norm(V_target_linear_base[0:2]) 
+        
+        # ถ้ามีการเคลื่อนที่พอสมควร ให้เริ่มหันหัว
+        if v_norm_xy > 0.001: 
+            # สร้างเวกเตอร์เป้าหมาย (หันตามทิศที่กำลังไป และ Z=0 เพื่อให้ขนานกับ XY)
+            Z_tar = np.array([
+                V_target_linear_base[0] / v_norm_xy,
+                V_target_linear_base[1] / v_norm_xy,
+                0.0
+            ])
+            
+            # ดึงเวกเตอร์แกน Z ปัจจุบันของ End-Effector (มาจาก Column ที่ 3 ของ R_ee)
+            Z_cur = R_ee[:, 2]
+            
+            # ใช้ Cross Product หาแกนและทิศทางการหมุนที่ต้องชดเชย
+            omega_align = np.cross(Z_cur, Z_tar)
+            
+            # บวกค่าความเร็วเชิงมุมที่คำนวณได้เข้าไป (ยิ่งมุมต่างกันมาก ยิ่งหมุนเร็ว)
+            V_target_angular_base += K_align * omega_align
+        # ===============================================
+
         V_target_base = np.concatenate((V_target_linear_base, V_target_angular_base))
         J = self.kinematics.get_jacobian(current_q)
         lambda_sq = 0.01
         J_pinv = J.T @ np.linalg.inv(J @ J.T + lambda_sq * np.eye(6))
         q_dot = J_pinv @ V_target_base
+        
         max_q_dot = 1.0 
         q_dot = np.clip(q_dot, -max_q_dot, max_q_dot)
-        self.publish_joints_velo(q_dot.tolist(), 0.0)
-
+        # self.publish_joints_velo(q_dot.tolist(), 0.0)
+        
     def current_action(self,action:String):
         current_act = action.data
         if current_act == self.last_act:
@@ -801,60 +831,109 @@ def instant_jog_task(task):
         else:
             print(f"⛔[JOG ERROR] {axis} Out of range หรือเกิด Singularity")
 
-def forward_dir(dist):
-    # ป้องกันค่าติดลบหรือบั๊ก ให้แปลงเป็นทศนิยม
-    distance = dist.get('forward')
-    target_distance = abs(float(distance)) 
-    print(f"⏩ เริ่มเคลื่อนที่ Forward (แกน Z ของปลายแขน) ระยะเป้าหมาย: {target_distance:.3f} mm")
-    
-    # 1. ล็อกสถานะหุ่นยนต์ว่ากำลังทำงาน (ป้องกันไม่ให้คำสั่งอื่นมาแทรก)
-    node.current_machine_state = 1 
+def move_forward_and_align(dist, max_linear_speed=0.05, max_angular_speed=0.5):
+        distance = dist.get('forward')/1000
+        print(f"🚀 เริ่มทำงาน: วิ่งเป้าหมาย {distance} ซม. และหมุนขนานพื้นไปพร้อมกัน")
 
-    try:
-        # 2. หาตำแหน่งเริ่มต้น (X, Y, Z) ของ End-Effector
-        current_q = np.array(node.joints_to_publish)[:6]
-        current_slider = node.rail_to_publish
+        # =========================================================
+        # 1. อ่านค่าเริ่มต้น เพื่อคำนวณเป้าหมายทั้งตำแหน่งและการหมุน
+        # =========================================================
+        current_q = np.array(node.current_joint_positions)[:6]
+        current_slider = node.current_slider_position
         T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
-        start_pos = T_cur_list[-1][:3, 3] # ดึงเฉพาะพิกัด X, Y, Z
         
-        # 3. เตรียมแพ็กเกจจำลองแรง
-        force_msg = WrenchStamped()
-        
-        # กำหนดขนาดแรง (สมมติให้แรงผลัก 15 นิวตัน ถ้าอยากให้เร็วขึ้นให้ปรับเลขนี้ขึ้น)
-        # ถ้า distance ที่ส่งมาเป็นค่าติดลบ ให้ดึงกลับ (-15.0)
-        force_direction = 2.0 if float(distance) > 0 else -2.0 
-        
-        while rclpy.ok():
-            # 4. อัปเดตตำแหน่งปัจจุบันในลูป
-            current_q = np.array(node.joints_to_publish)[:6]
-            current_slider = node.rail_to_publish
-            T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
-            current_pos = T_cur_list[-1][:3, 3]
-            
-            # 5. คำนวณระยะกระจัด (Euclidean Distance) ที่เคลื่อนที่ไปแล้ว
-            moved_distance = np.linalg.norm((current_pos - start_pos))
-            print(moved_distance)
-            # 6. ตรวจสอบว่าถึงระยะหรือยัง
-            if moved_distance >= target_distance/1000:
-                print(f"✅ ขยับครบระยะ {moved_distance:.3f} m แล้ว สั่งเบรกหุ่นยนต์!")
-                # ส่งแรง 0.0 เพื่อให้ force_cb สั่งหยุดมอเตอร์
-                force_msg.wrench.force.z = 0.0
-                node.force_cb(force_msg) 
-                break
-                
-            else:
-                # ยังไม่ถึงเป้าหมาย: สั่งดันแรงไปที่แกน Z ต่อไป
-                force_msg.wrench.force.z = force_direction
-                # โยนเข้า force_cb โดยตรง (ไม่ต้องผ่าน Topic เพื่อให้ทำงานได้แบบ Real-time ทันที)
-                node.force_cb(force_msg)
-            
-            # หน่วงเวลาลูปประมาณ 50Hz (ป้องกัน CPU วิ่ง 100%)
-            time.sleep(0.02)
-            
-    finally:
-        # 7. เมื่อเสร็จสิ้น (หรือบังเอิญเกิด Error) ให้คืนสถานะหุ่นยนต์เป็นสถานะว่าง
-        node.current_machine_state = 0
+        R_start = T_cur_list[-1][:3, :3]
+        P_start = T_cur_list[-1][:3, 3] 
 
+        initial_Z_dir = R_start[:, 2] 
+        
+        # 1.1 คำนวณจุดหมายปลายทาง (Position Target)
+        P_target = P_start + (initial_Z_dir * distance)
+
+        # 1.2 คำนวณองศาเป้าหมาย (Orientation Target) บังคับ Z=0 ให้ขนานพื้น
+        z_tar = np.array([initial_Z_dir[0], initial_Z_dir[1], 0.0])
+        Z_target = z_tar / np.linalg.norm(z_tar)
+        stuck_counter = 0
+        prev_P_curr = P_start.copy()
+
+        # =========================================================
+        # 2. ลูปการเคลื่อนที่แบบควบคู่ (Simultaneous Control Loop)
+        # =========================================================
+        while rclpy.ok():
+            current_q = np.array(node.current_joint_positions)[:6]
+            T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, node.current_slider_position)
+            R_curr = T_cur_list[-1][:3, :3]
+            P_curr = T_cur_list[-1][:3, 3]
+
+            # --- คำนวณความเร็วเชิงเส้น (Linear Velocity) ---
+            P_error = P_target - P_curr
+            dist_to_target = np.linalg.norm(P_error)
+            
+            is_hitting_limit = False
+            for i in range(6):
+                # เผื่อระยะเซฟตี้ไว้ 0.02 Radian (ประมาณ 1.14 องศา) ก่อนชน Limit จริง
+                if current_q[i] <= Q_MIN[i] + 0.02 or current_q[i] >= Q_MAX[i] - 0.02:
+                    is_hitting_limit = True
+                    break
+
+            if is_hitting_limit:
+                print("🛑 ถึงขีดจำกัดข้อต่อ (Joint Limit)! ไปต่อไม่ได้แล้ว หยุดการทำงาน")
+                node.publish_joints_velo([0.0]*6, 0.0)
+                break
+
+            # =================================================================
+            # 🛡️ ระบบป้องกัน 2: ตรวจสอบว่า "ยืดสุดแขน (Singularity/Workspace Limit)" หรือไม่
+            # =================================================================
+            # หาระยะทางที่ปลายแขนขยับได้ใน 1 ลูป
+            step_move = np.linalg.norm(P_curr - prev_P_curr)
+            
+            # ถ้าขยับได้น้อยมากๆ (น้อยกว่า 0.05 มม. ต่อลูป) แปลว่าสมการเริ่มตัน
+            if step_move < 0.00005: 
+                stuck_counter += 1
+            else:
+                stuck_counter = 0
+
+            # ถ้าติดแหง็กแบบนี้ติดต่อกัน 20 ลูป (0.2 วินาที) และยังไม่ถึงเป้าหมาย
+            if stuck_counter > 20 and dist_to_target > 0.01:
+                print("🛑 หุ่นยนต์ยืดแขนไปจนสุดระยะเอื้อมแล้ว! หยุดการทำงานตรงนี้")
+                node.publish_joints_velo([0.0]*6, 0.0)
+                break
+
+            prev_P_curr = P_curr.copy()
+
+            Kp_linear = 1.5
+            V_linear = Kp_linear * P_error
+            if np.linalg.norm(V_linear) > max_linear_speed:
+                V_linear = (V_linear / np.linalg.norm(V_linear)) * max_linear_speed
+
+            # --- คำนวณความเร็วเชิงมุม (Angular Velocity) ---
+            Z_curr = R_curr[:, 2]
+            omega_align = np.cross(Z_curr, Z_target)
+            align_error = np.linalg.norm(omega_align)
+
+            Kp_angular = 1.5
+            V_angular = Kp_angular * omega_align
+            if np.linalg.norm(V_angular) > max_angular_speed:
+                V_angular = (V_angular / np.linalg.norm(V_angular)) * max_angular_speed
+
+            # --- ตรวจสอบเงื่อนไขการจบงาน (ต้องผ่านทั้ง 2 เงื่อนไข) ---
+            # ระยะห่าง < 5 มม. และ มุมคลาดเคลื่อนน้อยมากๆ
+            if dist_to_target < 0.005 and align_error < 0.01:
+                print("✅ ถึงเป้าหมายและขนานระนาบ XY เรียบร้อยแล้ว!")
+                node.publish_joints_velo([0.0]*6, 0.0)
+                break
+
+            # --- นำคำสั่งรวมกันเข้า Jacobian ---
+            V_target_base = np.concatenate((V_linear, V_angular))
+            J = node.kinematics.get_jacobian(current_q)
+            lambda_sq = 0.01
+            J_pinv = J.T @ np.linalg.inv(J @ J.T + lambda_sq * np.eye(6))
+            q_dot = J_pinv @ V_target_base
+            
+            q_dot = np.clip(q_dot, -1.0, 1.0)
+            node.publish_joints_velo(q_dot.tolist(), 0.0)
+            
+            time.sleep(0.01) # Update rate (100 Hz)
 
 def run_pose(task):
     target_task = None
@@ -899,7 +978,7 @@ def run_pose(task):
                 print("Busy or Unknown Control mode")
         elif label == "forward":
             if node.current_machine_state != 1:
-                forward_dir(i)
+                move_forward_and_align(i)
             else:
                 print("Robot is busy (working state)")
         else: 

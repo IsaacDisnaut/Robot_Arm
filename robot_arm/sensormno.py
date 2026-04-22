@@ -68,6 +68,7 @@ def main():
 
         if node.publishing:
             node.publish_force(entries)
+            print(f"Force sent")
             root.after(50, publish_loop)   # publish 20 Hz
 
     btn = tk.Button(
