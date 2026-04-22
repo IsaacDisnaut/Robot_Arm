@@ -83,7 +83,7 @@ class JointPublisher(Node):
     def __init__(self):
         super().__init__('ik_joint_publisher')
         self.publisher = self.create_publisher(JointState, '/motor', 10)
-        self.subscription = self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
+        self.subscription = self.create_subscription(JointState, '/motor', self.joint_cb, 10) #convert to /joint_state
         self.tasksub = self.create_subscription(String, '/goto_position', self.taskcb, 10)
         self.force_sub = self.create_subscription(WrenchStamped, '/force_sensor', self.force_cb, 10)
         self.current_action = self.create_subscription(String, '/current_action', self.current_action, 10)
@@ -125,19 +125,18 @@ class JointPublisher(Node):
         self.rail_to_publish = float(safe_base_y)
 
     def publish_joints_velo(self, joints_vel, slider_vel=0.0):
-        # [ADDED JOINT LIMITS] ระบบเบรกอัตโนมัติ เช็คว่าในอนาคตอันใกล้ (0.02s) จะล้ำเส้นไหม
+       
         dt = 0.02
         safe_slider_vel = slider_vel
         next_slider = self.rail_to_publish + slider_vel * dt
         if (next_slider <= SLIDER_MIN and slider_vel < 0) or (next_slider >= SLIDER_MAX and slider_vel > 0):
-            safe_slider_vel = 0.0 # ถ้ากำลังจะทะลุลิมิต ให้เบรกเป็น 0 ทันที
+            safe_slider_vel = 0.0 # 
 
         safe_joints_vel = list(joints_vel)
         for i in range(6):
             next_q = self.joints_to_publish[i] + joints_vel[i] * dt
             if (next_q <= Q_MIN[i] and joints_vel[i] < 0) or (next_q >= Q_MAX[i] and joints_vel[i] > 0):
-                safe_joints_vel[i] = 0.0 # ถ้ากำลังจะทะลุลิมิต ให้เบรกแกนนั้นเป็น 0 ทันที
-
+                safe_joints_vel[i] = 0.0 
         self.velocity_to_publish = [float(safe_slider_vel)] + [float(q) for q in safe_joints_vel]
 
     def machine_state(self, stat):
@@ -246,6 +245,12 @@ class JointPublisher(Node):
             print("Pause")
         else:
             self.publisher.publish(msg)
+        current_T_list = forward_kinematics_matrices(
+            self.joints_to_publish, L1, L2, L3, D6, self.rail_to_publish
+        )
+        current_T = current_T_list[-1]
+        current_pose = matrix_to_rpy(current_T)
+        self.ee_pose(current_pose)
 
 # ================= Math & Kinematics =================
 def rpy_to_matrix(roll, pitch, yaw):
@@ -375,7 +380,7 @@ def apply_circular_avoidance(current_pos, target_pos, r_avoid=0.22, z_max=0.4):
     return target_pos, False 
 
 def reset_home():
-    # [ADDED JOINT LIMITS] ถ้าตำแหน่ง Home เกินขอบเขต ให้ตัดขอบก่อน
+    
     tar_q = np.clip([0.0, -1.5708, 1.5708, 0, 0, 0], Q_MIN, Q_MAX)
     speed_pct = 40       
     Kp = 5.0 * (speed_pct / 100.0)
@@ -429,7 +434,6 @@ def move_save(task):
         current_T_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
         current_T = current_T_list[-1]
         current_pose = matrix_to_rpy(current_T)
-        node.ee_pose(current_pose)
 
         error_q = tar_q - current_q
         derivative_q = (error_q - prev_error_q) / dt
@@ -563,9 +567,6 @@ def move_save_ee(task):
         T_cur = T_cur_list[-1]
         cur_p = T_cur[:3, 3]
         cur_R = T_cur[:3, :3]
-
-        current_pose = matrix_to_rpy(T_cur)
-        node.ee_pose(current_pose)
 
         tar_p = waypoints[current_wp_idx]
         e_pos = tar_p - cur_p
@@ -720,8 +721,6 @@ def instant_jog_joint(task):
     current_slider = node.current_slider_position
     T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
     T_cur = T_cur_list[-1]
-    current_pose = matrix_to_rpy(T_cur)
-    node.ee_pose(current_pose)
 
     print(f"⚡ [JOG JOINT] ขยับแกน {axis} | ทิศ: {direction} | ความเร็ว: {speed}%")
 
@@ -772,8 +771,6 @@ def instant_jog_task(task):
     current_slider = node.current_slider_position
     T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
     T_cur = T_cur_list[-1]
-    current_pose = matrix_to_rpy(T_cur)
-    node.ee_pose(current_pose)
     
     current_tcp_pos = current_flange_pos + (current_flange_orient @ tcp_offset)
     target_tcp_pos = current_tcp_pos + step_pos
@@ -803,7 +800,62 @@ def instant_jog_task(task):
             print(f"⛔[JOG ERROR] คำสั่ง Jog {axis} ทำให้ข้อต่อหมุนเกิน Joint Limit! (คำสั่งถูกยกเลิก)")
         else:
             print(f"⛔[JOG ERROR] {axis} Out of range หรือเกิด Singularity")
+
+def forward_dir(dist):
+    # ป้องกันค่าติดลบหรือบั๊ก ให้แปลงเป็นทศนิยม
+    distance = dist.get('forward')
+    target_distance = abs(float(distance)) 
+    print(f"⏩ เริ่มเคลื่อนที่ Forward (แกน Z ของปลายแขน) ระยะเป้าหมาย: {target_distance:.3f} mm")
+    
+    # 1. ล็อกสถานะหุ่นยนต์ว่ากำลังทำงาน (ป้องกันไม่ให้คำสั่งอื่นมาแทรก)
+    node.current_machine_state = 1 
+
+    try:
+        # 2. หาตำแหน่งเริ่มต้น (X, Y, Z) ของ End-Effector
+        current_q = np.array(node.joints_to_publish)[:6]
+        current_slider = node.rail_to_publish
+        T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
+        start_pos = T_cur_list[-1][:3, 3] # ดึงเฉพาะพิกัด X, Y, Z
         
+        # 3. เตรียมแพ็กเกจจำลองแรง
+        force_msg = WrenchStamped()
+        
+        # กำหนดขนาดแรง (สมมติให้แรงผลัก 15 นิวตัน ถ้าอยากให้เร็วขึ้นให้ปรับเลขนี้ขึ้น)
+        # ถ้า distance ที่ส่งมาเป็นค่าติดลบ ให้ดึงกลับ (-15.0)
+        force_direction = 2.0 if float(distance) > 0 else -2.0 
+        
+        while rclpy.ok():
+            # 4. อัปเดตตำแหน่งปัจจุบันในลูป
+            current_q = np.array(node.joints_to_publish)[:6]
+            current_slider = node.rail_to_publish
+            T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
+            current_pos = T_cur_list[-1][:3, 3]
+            
+            # 5. คำนวณระยะกระจัด (Euclidean Distance) ที่เคลื่อนที่ไปแล้ว
+            moved_distance = np.linalg.norm((current_pos - start_pos))
+            print(moved_distance)
+            # 6. ตรวจสอบว่าถึงระยะหรือยัง
+            if moved_distance >= target_distance/1000:
+                print(f"✅ ขยับครบระยะ {moved_distance:.3f} m แล้ว สั่งเบรกหุ่นยนต์!")
+                # ส่งแรง 0.0 เพื่อให้ force_cb สั่งหยุดมอเตอร์
+                force_msg.wrench.force.z = 0.0
+                node.force_cb(force_msg) 
+                break
+                
+            else:
+                # ยังไม่ถึงเป้าหมาย: สั่งดันแรงไปที่แกน Z ต่อไป
+                force_msg.wrench.force.z = force_direction
+                # โยนเข้า force_cb โดยตรง (ไม่ต้องผ่าน Topic เพื่อให้ทำงานได้แบบ Real-time ทันที)
+                node.force_cb(force_msg)
+            
+            # หน่วงเวลาลูปประมาณ 50Hz (ป้องกัน CPU วิ่ง 100%)
+            time.sleep(0.02)
+            
+    finally:
+        # 7. เมื่อเสร็จสิ้น (หรือบังเอิญเกิด Error) ให้คืนสถานะหุ่นยนต์เป็นสถานะว่าง
+        node.current_machine_state = 0
+
+
 def run_pose(task):
     target_task = None
     try:
@@ -845,6 +897,11 @@ def run_pose(task):
                 instant_jog_joint(i)        
             else:
                 print("Busy or Unknown Control mode")
+        elif label == "forward":
+            if node.current_machine_state != 1:
+                forward_dir(i)
+            else:
+                print("Robot is busy (working state)")
         else: 
             if active_control_mode == 'effector' and node.current_machine_state != 1:
                 move_save_ee(pose_cmd)
@@ -854,7 +911,6 @@ def run_pose(task):
                 print(f"{active_control_mode} ,{node.current_machine_state}")
                 print("Busy or Unknown Control mode")
 
-# ================= Main Execution =================
 if __name__ == '__main__':
     rclpy.init()
     node = JointPublisher()
