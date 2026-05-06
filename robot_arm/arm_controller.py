@@ -82,8 +82,8 @@ class RobotVelocityKinematics:
 class JointPublisher(Node):
     def __init__(self):
         super().__init__('ik_joint_publisher')
-        self.publisher = self.create_publisher(JointState, '/motor', 10)
-        self.subscription = self.create_subscription(JointState, '/motor', self.joint_cb, 10) #convert to /joint_state
+        self.publisher = self.create_publisher(JointState, '/joint_states', 10) #convert to /motor
+        self.subscription = self.create_subscription(JointState, '/joint_states', self.joint_cb, 10) #convert to /joint_state
         self.tasksub = self.create_subscription(String, '/goto_position', self.taskcb, 10)
         self.force_sub = self.create_subscription(WrenchStamped, '/force_sensor', self.force_cb, 10)
         self.current_action = self.create_subscription(String, '/current_action', self.current_action, 10)
@@ -441,14 +441,13 @@ def reset_home():
     node.publish_joints_velo([0.0]*6,0)
 
 def move_save(task):
-    # [ADDED LIMIT] ตัดขอบเป้าหมายให้อยู่ในระยะที่ปลอดภัยตั้งแต่ต้น
     tar_q = np.clip(np.radians(task[:6]), Q_MIN, Q_MAX)  
     target_slider = np.clip(task[6]/1000, SLIDER_MIN, SLIDER_MAX)   
     
     speed_pct = task[7] 
     gripper = task[8]        
     node.machine_state(1)
-    Kp = 5.0 * (speed_pct / 100.0)
+    Kp = 0.5 * (speed_pct / 100.0)
     Kd = 0.1
     dt = 0.05 
     
@@ -517,7 +516,7 @@ def move_save_ee(task):
     gripper = task[8]
     node.machine_state(1)
     
-    Kp_pos = 1.0 * (speed_pct / 100.0)
+    Kp_pos = 0.5 * (speed_pct / 100.0)
     Kp_ori = 0.8 * (speed_pct / 100.0)
     Kp_slider = 1.0 * (speed_pct / 100.0) 
     dt = 0.05 
@@ -700,136 +699,155 @@ def instant_jog_joint(task):
             task = task[0]
         else:
             return
-    axis = task.get('axis', '')       
-    direction = task.get('direction', 0) 
-    speed = task.get('speed', 0)     
-
+    axis = task.get('axis', '')
+    direction = task.get('direction', 0)
+    speed = task.get('speed', 0)
+ 
     if direction == 0 or speed == 0:
         return
-
-    max_step_degrees = 1
-    step_deg = direction * (speed / 100.0) * max_step_degrees
-    step_rad = np.radians(step_deg)
-    max_step_slider_mm = 5.0 
-    step_slider_m = direction * (speed / 100.0) * max_step_slider_mm / 1000.0
-
-    step_q = np.zeros(6)
-    step_slider = 0.0
-    if node.safety_status ==2 or node.robot_status ==2:
-        while node.safety_status ==2 or node.robot_status ==2:
+ 
+    if node.safety_status == 2 or node.robot_status == 2:
+        while node.safety_status == 2 or node.robot_status == 2:
             print("Pause Temporary")
             time.sleep(0.1)
-
-    if axis == 'joint_1': step_q[0] = step_rad
-    elif axis == 'joint_2': step_q[1] = step_rad
-    elif axis == 'joint_3': step_q[2] = step_rad
-    elif axis == 'joint_4': step_q[3] = step_rad
-    elif axis == 'joint_5': step_q[4] = step_rad
-    elif axis == 'joint_6': step_q[5] = step_rad
-    elif axis in ['rail', 'slider']: step_slider = step_slider_m
-
-    current_target_q = np.array(node.joints_to_publish)
-    current_target_slider = node.rail_to_publish
-
-    new_q = current_target_q + step_q
-    new_slider = current_target_slider + step_slider
-
-    # [ADDED LIMIT] ตัดขอบค่าที่คำนวณได้ให้อยู่ในระยะขีดจำกัด
-    clamped_q = np.clip(new_q, Q_MIN, Q_MAX)
-    clamped_slider = np.clip(new_slider, SLIDER_MIN, SLIDER_MAX)
-    print(f"🔍 DEBUG:")
-    print(f"  เป้าหมายที่คำนวณได้ (เรเดียน): {np.round(new_q, 3)}")
-    print(f"  ค่า Q_MIN (เรเดียน): {np.round(Q_MIN, 3)}")
-    print(f"  ค่า Q_MAX (เรเดียน): {np.round(Q_MAX, 3)}")
-    print(f"  ค่าที่โดน Clamp แล้ว: {np.round(clamped_q, 3)}")
-    if not np.allclose(new_q, clamped_q) or not np.isclose(new_slider, clamped_slider):
-         print(f"⚠️ [JOG JOINT WARNING] แกน {axis} ถึงขีดจำกัด (Limit) แล้ว! จะหยุดที่ระยะปลอดภัย")
-
-    node.publish_joints(clamped_q.tolist(), float(clamped_slider))
-    
-    current_q = np.array(node.current_joint_positions)[:6] 
-    current_slider = node.current_slider_position
-    T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
-    T_cur = T_cur_list[-1]
-
-    print(f"⚡ [JOG JOINT] ขยับแกน {axis} | ทิศ: {direction} | ความเร็ว: {speed}%")
-
+ 
+    # Maximum joint velocity (rad/s) and slider velocity (m/s) at 100% speed
+    max_joint_vel = np.radians(30)       # 30 deg/s at 100%
+    max_slider_vel = 0.05                # 0.05 m/s at 100%
+ 
+    joint_vel = direction * (speed / 100.0) * max_joint_vel
+    slider_vel = direction * (speed / 100.0) * max_slider_vel
+ 
+    q_dot = np.zeros(6)
+    slider_dot = 0.0
+ 
+    if axis == 'joint_1': q_dot[0] = joint_vel
+    elif axis == 'joint_2': q_dot[1] = joint_vel
+    elif axis == 'joint_3': q_dot[2] = joint_vel
+    elif axis == 'joint_4': q_dot[3] = joint_vel
+    elif axis == 'joint_5': q_dot[4] = joint_vel
+    elif axis == 'joint_6': q_dot[5] = joint_vel
+    elif axis in ['rail', 'slider']: slider_dot = slider_vel
+ 
+    print(f"⚡ [JOG JOINT] ขยับแกน {axis} | ทิศ: {direction} | ความเร็ว: {speed}% | เป็นเวลา 0.5 วิ")
+ 
+    dt = 0.02
+    duration = 0.25
+    elapsed = 0.0
+ 
+    while elapsed < duration:
+        current_q = np.array(node.current_joint_positions)[:6]
+        current_slider = node.current_slider_position
+ 
+        # [JOINT LIMIT] ถ้าแกนไหนกำลังจะทะลุลิมิต ให้หยุดแกนนั้น
+        safe_q_dot = q_dot.copy()
+        for i in range(6):
+            if (current_q[i] <= Q_MIN[i] and safe_q_dot[i] < 0) or \
+               (current_q[i] >= Q_MAX[i] and safe_q_dot[i] > 0):
+                safe_q_dot[i] = 0.0
+                print(f"⚠️ [JOG JOINT WARNING] แกน {axis} ถึงขีดจำกัด (Limit) แล้ว! หยุดแกนนั้น")
+ 
+        safe_slider_dot = slider_dot
+        if (current_slider <= SLIDER_MIN and safe_slider_dot < 0) or \
+           (current_slider >= SLIDER_MAX and safe_slider_dot > 0):
+            safe_slider_dot = 0.0
+            print(f"⚠️ [JOG JOINT WARNING] Slider ถึงขีดจำกัด (Limit) แล้ว!")
+ 
+        node.publish_joints_velo(safe_q_dot.tolist(), float(safe_slider_dot))
+        time.sleep(dt)
+        elapsed += dt
+ 
+    node.publish_joints_velo([0.0] * 6, 0.0)
+    print(f"🛑 [JOG JOINT] หยุดแกน {axis}")
+ 
 def instant_jog_task(task):
     if isinstance(task, list) and len(task) > 0:
         task = task[0]
-
-    axis = task.get('axis', '')         
-    direction = task.get('direction', 0) 
-    speed = task.get('speed', 0)        
-
+ 
+    axis = task.get('axis', '')
+    direction = task.get('direction', 0)
+    speed = task.get('speed', 0)
+ 
     tcp_x = task.get('tcp_x', 0.0) / 1000.0
     tcp_y = task.get('tcp_y', 0.0) / 1000.0
     tcp_z = task.get('tcp_z', 0.0) / 1000.0
     tcp_offset = np.array([tcp_x, tcp_y, tcp_z])
-
+ 
     if direction == 0 or speed == 0:
         return
-
-    max_step_m = 5.0 / 1000.0  
-    max_step_rad = np.radians(1) 
-
-    step_pos = np.zeros(3)
-    step_rpy = np.zeros(3)
-    
-    if node.safety_status ==2 or node.robot_status ==2:
-        while node.safety_status ==2 or node.robot_status ==2:
+ 
+    if node.safety_status == 2 or node.robot_status == 2:
+        while node.safety_status == 2 or node.robot_status == 2:
             print("Pause Temporary")
             time.sleep(0.1)
-            
-    if axis == 'x': step_pos[0] = direction * (speed / 100.0) * max_step_m
-    elif axis == 'y': step_pos[1] = direction * (speed / 100.0) * max_step_m
-    elif axis == 'z': step_pos[2] = direction * (speed / 100.0) * max_step_m
-    elif axis == 'roll': step_rpy[0] = direction * (speed / 100.0) * max_step_rad
-    elif axis == 'pitch': step_rpy[1] = direction * (speed / 100.0) * max_step_rad
-    elif axis == 'yaw': step_rpy[2] = direction * (speed / 100.0) * max_step_rad
+ 
+    # Maximum linear (m/s) and angular (rad/s) velocity at 100% speed
+    max_linear_vel = 0.05                 # 5 cm/s at 100%
+    max_angular_vel = np.radians(30)      # 30 deg/s at 100%
+ 
+    linear_vel = direction * (speed / 100.0) * max_linear_vel
+    angular_vel = direction * (speed / 100.0) * max_angular_vel
+ 
+    # Build the 6D Cartesian velocity command [vx, vy, vz, wx, wy, wz]
+    V_cart = np.zeros(6)
+    if axis == 'x':     V_cart[0] = linear_vel
+    elif axis == 'y':   V_cart[1] = linear_vel
+    elif axis == 'z':   V_cart[2] = linear_vel
+    elif axis == 'roll':  V_cart[3] = angular_vel
+    elif axis == 'pitch': V_cart[4] = angular_vel
+    elif axis == 'yaw':   V_cart[5] = angular_vel
+ 
+    print(f"⚡ [JOG TASK] แกน {axis} | ทิศ: {direction} | ความเร็ว: {speed}% | เป็นเวลา 0.5 วิ")
+ 
+    dt = 0.02
+    duration = 0.25
+    elapsed = 0.0
+ 
+    while elapsed < duration:
+        current_q = np.array(node.current_joint_positions)[:6]
+        current_slider = node.current_slider_position
+ 
+        # --- Base collision check: compute where TCP will be after one dt step ---
+        T_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
+        T_ee = T_list[-1]
+        current_flange_pos = T_ee[:3, 3]
+        current_flange_orient = T_ee[:3, :3]
+        current_tcp_pos = current_flange_pos + (current_flange_orient @ tcp_offset)
+ 
+        # Predict next TCP position based on linear part of velocity
+        next_tcp_pos = current_tcp_pos + V_cart[0:3] * dt
+        t_x, t_y, t_z = next_tcp_pos
+        in_zone_x = -0.2 <= t_x <= 0.2
+        in_zone_y = -0.2 <= t_y <= 0.2
+        in_zone_z = 0.0 <= t_z <= 0.4
+        if in_zone_x and in_zone_y and in_zone_z:
+            print(f"⚠️ [JOG TASK WARNING] Arm approaching base area (x:{t_x:.3f}, y:{t_y:.3f}, z:{t_z:.3f}) หยุดการเคลื่อนที่")
+            break
+ 
+        # --- Jacobian pseudoinverse: V_cart -> q_dot ---
+        J = node.kinematics.get_jacobian(current_q)
+        det_JJT = np.linalg.det(J @ J.T)
+        w = np.sqrt(max(0.0, det_JJT))
+        w_threshold = 0.05
+        lambda_sq = 0.01 * (1.0 - (w / w_threshold) ** 2) if w < w_threshold else 0.0
+        J_pinv = J.T @ np.linalg.inv(J @ J.T + lambda_sq * np.eye(6))
+        q_dot = J_pinv @ V_cart
+ 
+        # [JOINT LIMIT] ถ้าแกนไหนกำลังจะทะลุลิมิต ให้หยุดแกนนั้น
+        for i in range(6):
+            if (current_q[i] <= Q_MIN[i] and q_dot[i] < 0) or \
+               (current_q[i] >= Q_MAX[i] and q_dot[i] > 0):
+                q_dot[i] = 0.0
+                print(f"⚠️ [JOG TASK WARNING] Joint {i+1} ถึงขีดจำกัด (Limit) แล้ว!")
+ 
+        node.publish_joints_velo(q_dot.tolist(), 0.0)
+        time.sleep(dt)
+        elapsed += dt
+ 
+    node.publish_joints_velo([0.0] * 6, 0.0)
+    print(f"🛑 [JOG TASK] หยุดแกน {axis}")
+ 
 
-    current_q = np.array(node.joints_to_publish)
-    current_slider = node.rail_to_publish
-
-    T_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, base_y=0.0)
-    T_end_effector = T_list[-1] 
-    
-    current_flange_pos = T_end_effector[:3, 3]    
-    current_flange_orient = T_end_effector[:3, :3]
-    
-    current_q = np.array(node.current_joint_positions)[:6] 
-    current_slider = node.current_slider_position
-    T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
-    T_cur = T_cur_list[-1]
-    
-    current_tcp_pos = current_flange_pos + (current_flange_orient @ tcp_offset)
-    target_tcp_pos = current_tcp_pos + step_pos
-    step_orient = rpy_to_matrix(step_rpy[0], step_rpy[1], step_rpy[2])
-    target_tcp_orient = step_orient @ current_flange_orient 
-    target_flange_pos = target_tcp_pos - (target_tcp_orient @ tcp_offset)
-    
-    new_q, reachable = inverse_kinematics_6dof(target_flange_pos, target_tcp_orient, L1, L2, L3, D6)
-    
-    t_x, t_y, t_z = target_tcp_pos
-    in_zone_x = -0.2 <= t_x <= 0.2
-    in_zone_y = -0.2 <= t_y <= 0.2
-    in_zone_z = 0.0 <= t_z <= 0.4
-    
-    is_in_restricted_zone = in_zone_x and in_zone_y and in_zone_z
-    
-    # [ADDED LIMIT] ตรวจสอบว่าพิกัด IK ที่คำนวณได้ ล้ำเส้น Joint Limit หรือไม่
-    within_limits = np.all((new_q >= Q_MIN) & (new_q <= Q_MAX))
-
-    if is_in_restricted_zone:
-        print(f"⚠️[JOG WARNING] Arm in base area (x:{t_x:.3f}, y:{t_y:.3f}, z:{t_z:.3f})")
-    elif reachable and within_limits:
-        node.publish_joints(new_q.tolist(), float(current_slider))
-        print(f"[JOG GLOBAL] move {axis} success! | in direction: {direction}")
-    else:
-        if not within_limits:
-            print(f"⛔[JOG ERROR] คำสั่ง Jog {axis} ทำให้ข้อต่อหมุนเกิน Joint Limit! (คำสั่งถูกยกเลิก)")
-        else:
-            print(f"⛔[JOG ERROR] {axis} Out of range หรือเกิด Singularity")
 
 def move_forward_and_align(dist, max_linear_speed=0.05, max_angular_speed=0.5):
         distance = dist.get('forward')/1000
