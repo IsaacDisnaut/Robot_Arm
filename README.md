@@ -1,5 +1,7 @@
 # Robot_Arm
-ros2 launch robot_Arm arm.launch.py you can close force sensor interface
+ros2 launch robot_Arm arm.launch.py 
+
+you can close force sensor interface
 run code arm_controller.py
 
 # If you have robotARM-ui
