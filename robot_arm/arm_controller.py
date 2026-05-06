@@ -692,7 +692,7 @@ def move_save_ee(task):
         time.sleep(dt)
     
     node.publish_joints_velo([0.0]*6, 0.0)
-    
+
 def instant_jog_joint(task):
     if isinstance(task, list):
         if len(task) > 0:
@@ -732,12 +732,25 @@ def instant_jog_joint(task):
     print(f"⚡ [JOG JOINT] ขยับแกน {axis} | ทิศ: {direction} | ความเร็ว: {speed}% | เป็นเวลา 0.5 วิ")
  
     dt = 0.02
-    duration = 0.25
+    duration = 0.5
     elapsed = 0.0
  
     while elapsed < duration:
         current_q = np.array(node.current_joint_positions)[:6]
         current_slider = node.current_slider_position
+ 
+        # --- Base collision check: predict next TCP position via FK ---
+        T_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
+        T_ee = T_list[-1]
+        next_tcp_pos = T_ee[:3, 3] + T_ee[:3, :3] @ np.zeros(3)  # no tcp offset for joint jog
+        # predict one step ahead using current joint velocity
+        next_q_pred = current_q + q_dot * dt
+        T_list_next = forward_kinematics_matrices(next_q_pred, L1, L2, L3, D6, current_slider)
+        next_tcp_pos = T_list_next[-1][:3, 3]
+        t_x, t_y, t_z = next_tcp_pos
+        if -0.2 <= t_x <= 0.2 and -0.2 <= t_y <= 0.2 and 0.0 <= t_z <= 0.4:
+            print(f"⚠️ [JOG JOINT WARNING] Arm approaching base area (x:{t_x:.3f}, y:{t_y:.3f}, z:{t_z:.3f}) หยุดการเคลื่อนที่")
+            break
  
         # [JOINT LIMIT] ถ้าแกนไหนกำลังจะทะลุลิมิต ให้หยุดแกนนั้น
         safe_q_dot = q_dot.copy()
@@ -759,6 +772,7 @@ def instant_jog_joint(task):
  
     node.publish_joints_velo([0.0] * 6, 0.0)
     print(f"🛑 [JOG JOINT] หยุดแกน {axis}")
+
  
 def instant_jog_task(task):
     if isinstance(task, list) and len(task) > 0:
