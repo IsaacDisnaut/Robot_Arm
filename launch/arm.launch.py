@@ -23,7 +23,7 @@ def generate_launch_description():
             executable='robot_state_publisher',
             output='screen',
             parameters=[{'robot_description': open(urdf).read()}],
-            # remappings=[('/joint_states', '/motor')]
+            remappings=[('/joint_states', '/motor')]
         ),
 
         # Node(

@@ -82,7 +82,7 @@ class RobotVelocityKinematics:
 class JointPublisher(Node):
     def __init__(self):
         super().__init__('ik_joint_publisher')
-        self.publisher = self.create_publisher(JointState, '/joint_states', 10) #convert to /motor
+        self.publisher = self.create_publisher(JointState, '/motor', 10) #convert to /motor
         self.subscription = self.create_subscription(JointState, '/joint_states', self.joint_cb, 10) #convert to /joint_state
         self.tasksub = self.create_subscription(String, '/goto_position', self.taskcb, 10)
         self.force_sub = self.create_subscription(WrenchStamped, '/force_sensor', self.force_cb, 10)
@@ -814,7 +814,7 @@ def instant_jog_task(task):
     print(f"⚡ [JOG TASK] แกน {axis} | ทิศ: {direction} | ความเร็ว: {speed}% | เป็นเวลา 0.5 วิ")
  
     dt = 0.02
-    duration = 0.25
+    duration = 0.5
     elapsed = 0.0
  
     while elapsed < duration:
@@ -1022,24 +1022,38 @@ def run_pose(task):
                 print(f"{active_control_mode} ,{node.current_machine_state}")
                 print("Busy or Unknown Control mode")
 
-if __name__ == '__main__':
-    rclpy.init()
+def main(args=None):
+    global node
+    global jacobian
+
+    rclpy.init(args=args)
+
     node = JointPublisher()
-    
-    ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+
+    ros_thread = threading.Thread(
+        target=rclpy.spin,
+        args=(node,),
+        daemon=True
+    )
     ros_thread.start()
 
     jacobian = RobotVelocityKinematics()
 
     print("✅ Node หุ่นยนต์ทำงานแล้ว (พร้อม Limit Control)")
     print("📡 รอรับคำสั่งผ่าน Topic: /goto_position และ /force_sensor")
-    
+
     try:
         while rclpy.ok():
             time.sleep(0.1)
+
     except KeyboardInterrupt:
         print("กำลังปิดโปรแกรม...")
+
     finally:
-        node.publish_joints_velo([0.0]*6)
+        node.publish_joints_velo([0.0] * 6)
         node.destroy_node()
         rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
