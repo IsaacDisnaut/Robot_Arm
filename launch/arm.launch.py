@@ -43,11 +43,11 @@ def generate_launch_description():
             output='screen',
             arguments=['-d', rviz_config]
         ),
-        Node(
-            package='robot_arm',
-            executable='force',
-            output='screen'
-        ),
+        # Node(
+        #     package='robot_arm',
+        #     executable='force',
+        #     output='screen'
+        # ),
         ExecuteProcess(
             cmd=['npm', 'start'],
             cwd=web_dir,
