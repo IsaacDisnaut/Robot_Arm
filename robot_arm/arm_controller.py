@@ -7,7 +7,7 @@ from geometry_msgs.msg import WrenchStamped,Pose, Point, Quaternion
 import threading
 import json
 import time
-
+import os
 L1, L2, L3 = 0.28787, 0.26096, 0.26136
 D6 = 0.07074
 J4_OFFSET_Y = 0.02175
@@ -15,7 +15,7 @@ A1=0.020885
 
 Q_MIN = np.radians([-180.0, -180.0, -120.0, -180.0, -100.0, -360.0])
 Q_MAX = np.radians([ 180.0,  30.0,  150.0,  180.0,  100.0,  360.0])
-
+print(os.environ.get("ROS_DOMAIN_ID", 0))
 # กำหนดขีดจำกัดของรางสไลด์ (หน่วยเป็นเมตร)
 SLIDER_MIN = -1.0
 SLIDER_MAX = 1.0
@@ -85,6 +85,7 @@ class RobotVelocityKinematics:
 class JointPublisher(Node):
     def __init__(self):
         super().__init__('ik_joint_publisher')
+        self.action = self.create_subscription(String,'/arm_command',self.actioncb,10)
         self.publisher = self.create_publisher(JointState, '/motor', 10) #convert to /motor
         self.subscription = self.create_subscription(JointState, '/motor', self.joint_cb, 10) #convert to /joint_state
         self.tasksub = self.create_subscription(String, '/goto_position', self.taskcb, 10)
@@ -112,6 +113,22 @@ class JointPublisher(Node):
         self.is_force_moving = False
         self.is_busy = False
         self.stop_event = threading.Event()
+        
+    def actioncb(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError as e:
+            print(f"[actioncb] JSON parse error: {e}  raw={msg.data!r}")
+            return
+
+        action = data.get("action", "")
+        step   = data.get("step", 0)
+
+        if not action:
+            print("[actioncb] Missing 'action' field")
+            return
+
+        print(f"[actioncb] step={step}  action={action}")
 
     def taskcb(self, msg: String):
         if self.current_machine_state == 1:
@@ -1083,7 +1100,7 @@ def run_pose(task):
                 instant_jog_joint(i)        
             else:
                 print("Busy or Unknown Control mode")
-        elif label == "forward":
+        elif label =="forward":
             if node.current_machine_state != 1:
                 move_forward_and_align(i)
             else:
@@ -1096,6 +1113,7 @@ def run_pose(task):
             else:
                 print(f"{active_control_mode} ,{node.current_machine_state}")
                 print("Busy or Unknown Control mode")
+
 
 def main(args=None):
     global node

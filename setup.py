@@ -33,9 +33,10 @@ setup(
             'IK = robot_arm.arm_controller:main',
             'mov_py = robot_arm.mov:main',
             'force = robot_arm.sensormno:main',
-            'test = robot_arm.fortest:main',
+            'test = robot_arm.test2:main',
             'plot = robot_arm.plot:main',
             'rot = robot_arm.rotreader:main',
+            'plan = robot_arm.task_planning_ui:main',
             
             
 

@@ -31,11 +31,11 @@ def generate_launch_description():
         #     executable='joint_state_publisher_gui',
         #     output='screen'
         # ),
-        # Node(
-        #     package='robot_arm',
-        #     executable='IK',
-        #     output='screen'
-        # ),
+        Node(
+            package='robot_arm',
+            executable='plan',
+            output='screen'
+        ),
         Node(
             package='rviz2',
             executable='rviz2',
@@ -43,11 +43,16 @@ def generate_launch_description():
             output='screen',
             arguments=['-d', rviz_config]
         ),
-        # Node(
-        #     package='robot_arm',
-        #     executable='force',
-        #     output='screen'
-        # ),
+        Node(
+            package='robot_arm',
+            executable='IK',
+            output='screen'
+        ),
+        Node(
+            package='robot_arm',
+            executable='test',
+            output='screen'
+        ),
         ExecuteProcess(
             cmd=['npm', 'start'],
             cwd=web_dir,
