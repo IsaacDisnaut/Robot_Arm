@@ -11,7 +11,7 @@ import threading
 class JointPublisher(Node):
     def __init__(self):
         super().__init__('ik_joint_publisher')
-        self.publisher = self.create_publisher(JointState, 'joint_states', 10)
+        self.publisher = self.create_publisher(JointState, '/motor', 10)
 
     def publish_joints(self, joints, base_y):
         joint_msg = JointState()

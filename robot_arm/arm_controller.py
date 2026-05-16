@@ -4,10 +4,15 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String,Int8
 from geometry_msgs.msg import WrenchStamped,Pose, Point, Quaternion
+from visualization_msgs.msg import Marker, MarkerArray
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
 import threading
 import json
 import time
 import os
+import tkinter as tk
+from collections import deque
 L1, L2, L3 = 0.28787, 0.26096, 0.26136
 D6 = 0.07074
 J4_OFFSET_Y = 0.02175
@@ -99,6 +104,7 @@ class JointPublisher(Node):
         
         self.machine_state_pub = self.create_publisher(Int8, '/machine_state', 10)
         self.ee_pose_pub = self.create_publisher(Pose, '/ee_pose', 10)
+        self.goto_pub = self.create_publisher(String, '/goto_position', 10)
         self.current_machine_state= 0
         self.current_joint_positions = [0.0] * 6
         self.current_slider_position = 0.0
@@ -113,7 +119,101 @@ class JointPublisher(Node):
         self.is_force_moving = False
         self.is_busy = False
         self.stop_event = threading.Event()
+
+        # Trail visualization — one Path publisher per FK frame (base + joint_1..6)
+        self._trail_names = ['base', 'joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'ee']
+        self._trail_max = 800  # ~16 s of history at 50 Hz
+        self._trails = [deque(maxlen=self._trail_max) for _ in range(7)]  # stores (x,y,z,qx,qy,qz,qw)
+        self._trail_distances = [0.0] * 7       # total path length per frame (metres)
+        self._trail_prev_pos = [None] * 7       # previous position for delta calc
+        self._path_pubs = [
+            self.create_publisher(Path, f'/joint_trails/{n}', 10)
+            for n in self._trail_names
+        ]
+        self._text_pub = self.create_publisher(MarkerArray, '/joint_trail_info', 10)
+        self._trail_colors = [
+            (1.0, 0.2, 0.2),  # base     – red
+            (1.0, 0.6, 0.0),  # joint_1  – orange
+            (1.0, 1.0, 0.0),  # joint_2  – yellow
+            (0.2, 1.0, 0.2),  # joint_3  – green
+            (0.0, 0.8, 1.0),  # joint_4  – cyan
+            (0.4, 0.4, 1.0),  # joint_5  – blue
+            (1.0, 0.2, 1.0),  # EE       – magenta
+        ]
         
+    def _publish_trails(self, t_list):
+        stamp = self.get_clock().now().to_msg()
+        text_ma = MarkerArray()
+
+        for i, T in enumerate(t_list):
+            pos = T[:3, 3]
+            qx, qy, qz, qw = _rot_to_quat(T[:3, :3])
+
+            # accumulate path length since last sample
+            if self._trail_prev_pos[i] is not None:
+                self._trail_distances[i] += float(np.linalg.norm(pos - self._trail_prev_pos[i]))
+            self._trail_prev_pos[i] = pos.copy()
+            self._trails[i].append((float(pos[0]), float(pos[1]), float(pos[2]),
+                                    float(qx), float(qy), float(qz), float(qw)))
+
+            # --- Path: full trajectory of this frame's origin (with orientation) ---
+            path_msg = Path()
+            path_msg.header.frame_id = 'world'   # match your RViz fixed frame
+            path_msg.header.stamp = stamp
+            for s in self._trails[i]:
+                ps = PoseStamped()
+                ps.header.frame_id = 'world'
+                ps.header.stamp = stamp
+                ps.pose.position.x = s[0]
+                ps.pose.position.y = s[1]
+                ps.pose.position.z = s[2]
+                ps.pose.orientation.x = s[3]
+                ps.pose.orientation.y = s[4]
+                ps.pose.orientation.z = s[5]
+                ps.pose.orientation.w = s[6]
+                path_msg.poses.append(ps)
+            self._path_pubs[i].publish(path_msg)
+
+            color = self._trail_colors[i]
+            name  = self._trail_names[i]
+            pt    = (float(pos[0]), float(pos[1]), float(pos[2]))
+
+            # --- SPHERE: current position of this frame's origin ---
+            sphere = Marker()
+            sphere.header.frame_id = 'world'
+            sphere.header.stamp = stamp
+            sphere.ns = 'trail_dot'
+            sphere.id = i
+            sphere.type = Marker.SPHERE
+            sphere.action = Marker.ADD
+            sphere.pose.position.x, sphere.pose.position.y, sphere.pose.position.z = pt
+            sphere.pose.orientation.w = 1.0
+            sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.012
+            sphere.color.r, sphere.color.g, sphere.color.b = color
+            sphere.color.a = 1.0
+            text_ma.markers.append(sphere)
+
+            # --- TEXT: frame name + total distance travelled ---
+            text = Marker()
+            text.header.frame_id = 'world'
+            text.header.stamp = stamp
+            text.ns = 'trail_dist'
+            text.id = i + 7
+            text.type = Marker.TEXT_VIEW_FACING
+            text.action = Marker.ADD
+            text.pose.position.x = pt[0]
+            text.pose.position.y = pt[1]
+            text.pose.position.z = pt[2] + 0.05   # float above the dot
+            text.pose.orientation.w = 1.0
+            text.scale.z = 0.022                   # text height (m)
+            text.color.r, text.color.g, text.color.b = color
+            text.color.a = 1.0
+            dist_cm = self._trail_distances[i] * 100.0
+            text.text = f'{name}: {dist_cm:.1f} cm'
+            text_ma.markers.append(text)
+
+        self._text_pub.publish(text_ma)
+
     def actioncb(self, msg: String):
         try:
             data = json.loads(msg.data)
@@ -176,6 +276,17 @@ class JointPublisher(Node):
         qx, qy, qz, qw = rpy_degrees_to_quaternion(roll, pitch, yaw)
         out_msg.orientation = Quaternion(x=float(qx), y=float(qy), z=float(qz), w=float(qw))
         self.ee_pose_pub.publish(out_msg)
+
+    def publish_goto(self, joints_deg, rail_mm, speed_pct=50, mode='effector'):
+        payload = [{'label': 'move_point', 'sequence': 1,
+                    'joint_1': float(joints_deg[0]), 'joint_2': float(joints_deg[1]),
+                    'joint_3': float(joints_deg[2]), 'joint_4': float(joints_deg[3]),
+                    'joint_5': float(joints_deg[4]), 'joint_6': float(joints_deg[5]),
+                    'rail': float(rail_mm), 'speed': int(speed_pct), 'delay': None,
+                    'gripper': 0, 'control_mode': mode}]
+        msg = String()
+        msg.data = json.dumps(payload)
+        self.goto_pub.publish(msg)
 
     def joint_cb(self, msg):
         if len(msg.position) >= 7:
@@ -303,8 +414,25 @@ class JointPublisher(Node):
         current_T = current_T_list[-1]
         current_pose = matrix_to_rpy(current_T)
         self.ee_pose(current_pose)
+        self._publish_trails(current_T_list)
 
 # ================= Math & Kinematics =================
+def _rot_to_quat(R):
+    """3x3 rotation matrix → (qx, qy, qz, qw)."""
+    tr = R[0,0] + R[1,1] + R[2,2]
+    if tr > 0:
+        s = 0.5 / np.sqrt(tr + 1.0)
+        return (R[2,1]-R[1,2])*s, (R[0,2]-R[2,0])*s, (R[1,0]-R[0,1])*s, 0.25/s
+    elif R[0,0] > R[1,1] and R[0,0] > R[2,2]:
+        s = 2.0 * np.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
+        return 0.25*s, (R[0,1]+R[1,0])/s, (R[0,2]+R[2,0])/s, (R[2,1]-R[1,2])/s
+    elif R[1,1] > R[2,2]:
+        s = 2.0 * np.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
+        return (R[0,1]+R[1,0])/s, 0.25*s, (R[1,2]+R[2,1])/s, (R[0,2]-R[2,0])/s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
+        return (R[0,2]+R[2,0])/s, (R[1,2]+R[2,1])/s, 0.25*s, (R[1,0]-R[0,1])/s
+
 def rpy_to_matrix(roll, pitch, yaw):
     Rx = np.array([[1, 0, 0], [0, np.cos(roll), -np.sin(roll)], [0, np.sin(roll), np.cos(roll)]])
     Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)], [0, 1, 0], [-np.sin(pitch), 0, np.cos(pitch)]])
@@ -348,13 +476,16 @@ def rpy_degrees_to_quaternion(roll_deg, pitch_deg, yaw_deg):
 
 def forward_kinematics_matrices(q, l1, l2, l3, d6, base_y=0.0):
     q1, q2, q3, q4, q5, q6 = q
+    # gamma accounts for the J4_OFFSET_Y mechanical offset — must match get_jacobian exactly
+    gamma  = np.arctan2(J4_OFFSET_Y, l3)
+    l3_eff = np.sqrt(l3**2 + J4_OFFSET_Y**2)
     dh_params = [
-        [q1,           l1, 0,  -np.pi/2], 
-        [q2,           0,  l2,  0      ], 
-        [q3 + np.pi/2, 0,  0,   np.pi/2], 
-        [q4,           l3, 0,  -np.pi/2], 
-        [q5,           0,  0,   np.pi/2], 
-        [q6,           d6, 0,   0      ]  
+        [q1,                 l1,     A1,  -np.pi/2],
+        [q2,                 0,      l2,   0       ],
+        [q3 + np.pi/2 - gamma, 0,    0,   np.pi/2 ],
+        [q4,                 l3_eff, 0,  -np.pi/2 ],
+        [q5 + gamma,         0,      0,   np.pi/2 ],
+        [q6,                 d6,     0,   0        ],
     ]
     T = np.eye(4)
     T[1, 3] = base_y 
@@ -458,7 +589,6 @@ def reset_home():
         if np.all(reached_mask):
             print("🎯 [RESET] กลับตำแหน่ง Home เรียบร้อยแล้ว!")
             break
-        time.sleep(dt) 
         
     node.publish_joints_velo([0.0]*6,0)
 
@@ -471,11 +601,23 @@ def move_save(task):
     node.machine_state(1)
     Kp = 0.5 * (speed_pct / 100.0)
     Kd = 0.1
-    dt = 0.05 
-    
-    prev_error_q = np.zeros(6)
-    prev_error_slider = 0.0  
-    
+    dt = 0.05
+
+    # initialize to actual error so first-iteration derivative = 0 (no spike)
+    _q0 = np.array(node.current_joint_positions)
+    prev_error_q = tar_q - _q0
+    prev_error_slider = target_slider - node.current_slider_position
+
+    r_avoid = 0.3   # base exclusion radius (m)
+
+    # pre-flight: cancel if target EE position is inside the base radius
+    T_tar_list = forward_kinematics_matrices(tar_q, L1, L2, L3, D6, target_slider)
+    tar_p = T_tar_list[-1][:3, 3]
+    if np.sqrt(tar_p[0]**2 + tar_p[1]**2) < r_avoid:
+        print(f"[ERROR] ยกเลิกคำสั่ง! ตำแหน่งเป้าหมายอยู่ในรัศมีฐานหุ่นยนต์ (r={np.sqrt(tar_p[0]**2+tar_p[1]**2):.3f} m < {r_avoid} m)")
+        node.machine_state(0)
+        return
+
     print(f"🚀 [MOVE] เคลื่อนที่ด้วย PD Control (Kp: {Kp}, Kd: {Kd})")
 
     while True:
@@ -486,13 +628,21 @@ def move_save(task):
         current_T = current_T_list[-1]
         current_pose = matrix_to_rpy(current_T)
 
+        # in-loop safety: stop if EE drifts into the base exclusion zone
+        ee_p = current_T[:3, 3]
+        if np.sqrt(ee_p[0]**2 + ee_p[1]**2) < r_avoid:
+            node.publish_joints_velo([0.0]*6, 0.0)
+            print(f"⚠️ [MOVE] หยุดฉุกเฉิน! ปลายแขนเข้าใกล้ฐานหุ่นยนต์ (r={np.sqrt(ee_p[0]**2+ee_p[1]**2):.3f} m)")
+            node.machine_state(0)
+            return
+
         error_q = tar_q - current_q
         derivative_q = (error_q - prev_error_q) / dt
         q_dot = (Kp * error_q) + (Kd * derivative_q)
         
-        max_limit = 1.5 
+        max_limit = 2 
         q_dot = np.clip(q_dot, -max_limit, max_limit)
-        reached_mask = np.abs(error_q) < 0.005
+        reached_mask = np.abs(error_q) < 0.05
         q_dot[reached_mask] = 0.0 
         
         error_slider = target_slider - current_slider
@@ -514,7 +664,6 @@ def move_save(task):
         if node.safety_status ==2 or node.robot_status ==2:
             while node.safety_status ==2 or node.robot_status ==2:
                 print("Pause Temporary")
-                time.sleep(0.1)
 
         node.publish_joints_velo(q_dot.tolist(), float(slider_dot))
         
@@ -525,243 +674,187 @@ def move_save(task):
             print("🎯 [MOVE] ทุกแกนและรางสไลด์เข้าสู่ตำแหน่งเป้าหมายแล้ว!")
             node.machine_state(2)
             break
-            
-        time.sleep(dt) 
         
     node.publish_joints_velo([0.0]*6, 0.0)
 
-def move_save_ee(task):
-    # [ADDED LIMIT] ตัดขอบเป้าหมายปลายทาง
-    tar_q = np.clip(np.radians(task[:6]), Q_MIN, Q_MAX) if JOINT_LIMITS_ENABLED else np.radians(task[:6])
-    target_slider = np.clip(task[6] / 1000.0, SLIDER_MIN, SLIDER_MAX) if JOINT_LIMITS_ENABLED else task[6] / 1000.0
-    speed_pct = task[7] 
-    gripper = task[8]
-    node.machine_state(1)
-    
-    Kp_pos = 0.5 * (speed_pct / 100.0)
-    Kp_ori = 0.8 * (speed_pct / 100.0)
-    Kp_slider = 1.0 * (speed_pct / 100.0) 
-    dt = 0.05 
-    r_avoid = 0.25 
-    z_max = 0.45   
-    
-    T_tar_list = forward_kinematics_matrices(tar_q, L1, L2, L3, D6, target_slider)
-    T_tar = T_tar_list[-1]
-    final_tar_p = T_tar[:3, 3]       
-    tar_R = T_tar[:3, :3]      
-    
-    current_q = np.array(node.current_joint_positions)[:6] 
-    current_slider = node.current_slider_position
-    T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
-    cur_p = T_cur_list[-1][:3, 3]
 
-    print(f"[PLANNING] เป้าหมายสุดท้าย: {np.round(final_tar_p, 3)}")
-    tar_x, tar_y, tar_z = final_tar_p
-    tar_radius = np.sqrt(tar_x**2 + tar_y**2)
 
-    if tar_radius < r_avoid and tar_z <= z_max:
-        print(f"[ERROR] ยกเลิกคำสั่ง! ตำแหน่งเป้าหมายจมอยู่ในฐานหุ่นยนต์")
-        node.machine_state(0)
-        node.publish_joints_velo([0.0]*6, 0.0) 
-        return
-        
-    waypoints = []
-    p1 = cur_p[:2]
-    p2 = final_tar_p[:2]
-    v_path = p2 - p1
-    path_len = np.linalg.norm(v_path)
-    
-    if path_len > 0.001:
-        v_dir = v_path / path_len
-        t = np.dot(-p1, v_dir)
-        t = np.clip(t, 0, path_len) 
-        closest_p_2d = p1 + t * v_dir
-        dist_to_origin = np.linalg.norm(closest_p_2d)
-
-        z_closest = cur_p[2] + (t / path_len) * (final_tar_p[2] - cur_p[2])
-
-        if dist_to_origin < r_avoid and z_closest < z_max:
-            print("🚧 [PLANNING] ตรวจพบเส้นทางตัดผ่านฐาน! กำลังสร้างจุดอ้อม...")
-            if dist_to_origin < 1e-4: 
-                n_vec = np.array([-v_dir[1], v_dir[0]]) 
-            else:
-                n_vec = closest_p_2d / dist_to_origin
-            safe_margin = 0.03
-            via_p_2d = n_vec * (r_avoid + safe_margin)
-            via_p = np.array([via_p_2d[0], via_p_2d[1], z_closest])
-            waypoints.append(via_p)
-            print(f"📍 [PLANNING] เพิ่มจุดแวะพัก (Via-point) ที่: {np.round(via_p, 3)}")
-            
-    waypoints.append(final_tar_p)
-    
-    current_wp_idx = 0
-    prev_q_dot = np.zeros(6)
-    loop_count = 0
-    aligning_joints = False 
+def _jacobian_move(tar_p, tar_R, target_slider, task):
+    """Inverse-Jacobian velocity control with DLS singularity prevention."""
+    Kp_pos     = 5.0
+    Kp_ori     = 5.0
+    dt         = 0.02
+    W_THRESH   = 0.02
+    LAMBDA_MAX = 0.05
 
     while True:
-        loop_count += 1
-
-        if node.safety_status == 1:
-            speed_pct = 0.5 * task[7]
-        else:
-            speed_pct = task[7]
-            
         if node.safety_status == 2 or node.robot_status == 2:
+            node.publish_joints_velo([0.0]*6, 0.0)
             while node.safety_status == 2 or node.robot_status == 2:
                 print("Pause Temporary")
-                time.sleep(0.1)
-                
-        current_q = np.array(node.current_joint_positions)[:6] 
-        current_slider = node.current_slider_position
-        T_cur_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
-        T_cur = T_cur_list[-1]
-        cur_p = T_cur[:3, 3]
-        cur_R = T_cur[:3, :3]
-
-        tar_p = waypoints[current_wp_idx]
-        e_pos = tar_p - cur_p
-        e_ori = 0.5 * (np.cross(cur_R[:, 0], tar_R[:, 0]) + 
-                       np.cross(cur_R[:, 1], tar_R[:, 1]) + 
-                       np.cross(cur_R[:, 2], tar_R[:, 2]))
         
-        v_norm = np.linalg.norm(e_pos)
-        w_norm = np.linalg.norm(e_ori)
 
-        e_joint = tar_q - current_q
-        joint_err_max = np.max(np.abs(e_joint))
-        e_slider = target_slider - current_slider
+        eff_speed  = 0.5 * task[7] if node.safety_status == 1 else task[7]
 
-        if current_wp_idx < len(waypoints) - 1:
-            if v_norm < 0.05:
-                print(f"✅ [PLANNING] ถึงจุดแวะพักที่ {current_wp_idx + 1} แล้ว มุ่งหน้าสู่เป้าหมายต่อไป!")
-                current_wp_idx += 1
-                continue 
-        else:
-            if v_norm < 0.02 and w_norm < 0.05:
-                if not aligning_joints:
-                    print("🔄 [PLANNING] เข้าใกล้เป้าหมาย สลับเข้าโหมดจัดองศาข้อต่อ (Joint Alignment)")
-                aligning_joints = True
+        current_q      = np.array(node.current_joint_positions)[:6]
+        current_slider = node.current_slider_position
+        T_cur          = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)[-1]
+        cur_p          = T_cur[:3, 3]
+        cur_R          = T_cur[:3, :3]
 
-        if aligning_joints:
-            Kp_joint = 2.0 * (speed_pct / 100.0)
-            q_dot_raw = Kp_joint * e_joint
-            
-            slider_dot = Kp_slider * e_slider
-            slider_dot = np.clip(slider_dot, -0.1, 0.1)
-            
-            alpha = 0.2 
-            q_dot = (alpha * q_dot_raw) + ((1.0 - alpha) * prev_q_dot)
-            prev_q_dot = q_dot.copy()
-            q_dot = np.clip(q_dot, -0.5, 0.5) 
-            
-            if joint_err_max < 0.001 and abs(e_slider) < 0.005:
-                print("🎯 [COMPLETE] เข้าสู่ตำแหน่งและองศาข้อต่อเป้าหมายสำเร็จ 100%!")
-                node.machine_state(2)
-                break
-                
-        else:
-            V_pos_target = Kp_pos * e_pos
-            max_v = 10 * (speed_pct / 100.0) 
-            if v_norm > 0 and np.linalg.norm(V_pos_target) > max_v:
-                V_pos_target = V_pos_target * (max_v / np.linalg.norm(V_pos_target))
-            
-            V_ori_target = Kp_ori * e_ori
-            max_w = 0.5 * (speed_pct / 100.0)  
-            if w_norm > 0 and np.linalg.norm(V_ori_target) > max_w:
-                V_ori_target = V_ori_target * (max_w / np.linalg.norm(V_ori_target))
+        e_pos = tar_p - cur_p
+        e_ori = 0.5 * (np.cross(cur_R[:, 0], tar_R[:, 0]) +
+                       np.cross(cur_R[:, 1], tar_R[:, 1]) +
+                       np.cross(cur_R[:, 2], tar_R[:, 2]))
 
-            V_target_abs = np.concatenate((V_pos_target, V_ori_target))
-            
-            slider_dot = Kp_slider * e_slider
-            slider_dot = np.clip(slider_dot, -0.2, 0.2)
-            
-            V_base = np.array([0.0, slider_dot, 0.0, 0.0, 0.0, 0.0])
-            V_arm_target = V_target_abs - V_base
-
-            J = jacobian.get_jacobian(current_q)
-            det_JJT = np.linalg.det(J @ J.T)
-            w = np.sqrt(max(0.0, det_JJT))
-
-            w_threshold = 0.05 
-            if w < w_threshold:
-                lambda_sq = 0.01 * (1.0 - (w / w_threshold)**2)
-            else:
-                lambda_sq = 0.0 
-                
-            J_pinv = J.T @ np.linalg.inv(J @ J.T + lambda_sq * np.eye(6))
-            q_dot_raw = J_pinv @ V_arm_target
-            
-            alpha = 0.3 
-            q_dot = (alpha * q_dot_raw) + ((1.0 - alpha) * prev_q_dot)
-            prev_q_dot = q_dot.copy()
-            q_dot = np.clip(q_dot, -1.0, 1.0)
-
-        # [ADDED LIMIT] ตรวจสอบความเร็วก่อนสั่งงาน ถ้าแกนไหนกำลังจะทะลุลิมิต ให้เบรกแกนนั้น
-        if JOINT_LIMITS_ENABLED:
-            for i in range(6):
-                if (current_q[i] <= Q_MIN[i] and q_dot[i] < 0) or (current_q[i] >= Q_MAX[i] and q_dot[i] > 0):
-                    q_dot[i] = 0.0
-            if (current_slider <= SLIDER_MIN and slider_dot < 0) or (current_slider >= SLIDER_MAX and slider_dot > 0):
-                slider_dot = 0.0
-
-        if not aligning_joints and np.linalg.norm(q_dot) < 0.005 and abs(slider_dot) < 0.005 and loop_count > 100:
-            print("⚠️ [WARNING] หุ่นขยับต่อไม่ได้แล้ว (ติด Singularity หรือ Joint Limits)")
-            node.machine_state(3)
+        if np.linalg.norm(e_pos) < 0.005 and np.linalg.norm(e_ori) < 0.02:
             break
 
-        node.publish_joints_velo(q_dot.tolist(), float(slider_dot))
-        time.sleep(dt)
-    
+        V = np.concatenate((Kp_pos * e_pos, Kp_ori * e_ori))
+        max_v = 0.5 * (eff_speed / 100.0)
+        if np.linalg.norm(V[:3]) > max_v:
+            V[:3] = V[:3] / np.linalg.norm(V[:3]) * max_v
+
+        # DLS inverse Jacobian
+        J       = jacobian.get_jacobian(current_q)
+        w_manip = np.sqrt(max(0.0, np.linalg.det(J @ J.T)))
+        if w_manip < W_THRESH:
+            lam_sq = LAMBDA_MAX ** 2 * (1.0 - (w_manip / W_THRESH) ** 2)
+            print(f"⚠️  [SINGULARITY] w={w_manip:.4f} λ²={lam_sq:.5f}")
+        else:
+            lam_sq = 0.0
+        J_pinv = J.T @ np.linalg.inv(J @ J.T + lam_sq * np.eye(6))
+        q_dot  = np.clip(J_pinv @ V, -1.5, 1.5)
+
+        if JOINT_LIMITS_ENABLED:
+            for i in range(6):
+                if (current_q[i] <= Q_MIN[i] and q_dot[i] < 0) or \
+                   (current_q[i] >= Q_MAX[i] and q_dot[i] > 0):
+                    q_dot[i] = 0.0
+
+        e_sl   = target_slider - current_slider
+        sl_dot = np.clip((eff_speed / 100.0) * e_sl, -0.2, 0.2)
+
+        node.publish_joints_velo(q_dot.tolist(), float(sl_dot))
+
     node.publish_joints_velo([0.0]*6, 0.0)
 
-def instant_jog_joint(task):
-    if isinstance(task, list) and len(task) > 0:
-        task = task[0]
-        
-    axis = task.get('axis', '')
-    direction = task.get('direction', 0)
-    speed = task.get('speed', 0)
 
-    if direction == 0 or speed == 0:
+def move_save_ee(task):
+    BOX_X = 0.2   # forbidden zone ±x (m)
+    BOX_Y = 0.2   # forbidden zone ±y (m)
+    MARGIN = 0.1  # clearance outside box for via-point
+
+    tar_q         = np.clip(np.radians(task[:6]), Q_MIN, Q_MAX) if JOINT_LIMITS_ENABLED else np.radians(task[:6])
+    target_slider = np.clip(task[6] / 1000.0, SLIDER_MIN, SLIDER_MAX) if JOINT_LIMITS_ENABLED else task[6] / 1000.0
+
+    # FK → target EE pose
+    T_tar    = forward_kinematics_matrices(tar_q, L1, L2, L3, D6, target_slider)[-1]
+    tar_p    = T_tar[:3, 3].copy()
+    tar_R    = T_tar[:3, :3].copy()
+    tar_pose = matrix_to_rpy(T_tar)
+    print(f"[TARGET EE] X={tar_pose[0]:.4f} Y={tar_pose[1]:.4f} Z={tar_pose[2]:.4f} m | "
+          f"Roll={tar_pose[3]:.2f} Pitch={tar_pose[4]:.2f} Yaw={tar_pose[5]:.2f} deg")
+
+    # Cancel if target is inside the forbidden box
+    if abs(tar_p[0]) <= BOX_X and abs(tar_p[1]) <= BOX_Y:
+        print(f"[ERROR] ยกเลิกคำสั่ง! เป้าหมายอยู่ในพื้นที่หวงห้าม "
+              f"(X={tar_p[0]:.3f} Y={tar_p[1]:.3f})")
+        node.machine_state(0)
         return
 
-    if node.safety_status == 2 or node.robot_status == 2:
-        while node.safety_status == 2 or node.robot_status == 2:
-            print("Pause Temporary")
-            time.sleep(0.1)
+    # Current EE position
+    cur_q  = np.array(node.current_joint_positions)[:6]
+    cur_p  = forward_kinematics_matrices(cur_q, L1, L2, L3, D6,
+                                         node.current_slider_position)[-1][:3, 3].copy()
 
-    # =====================================================================
-    # กำหนดความเร็วสูงสุด (แปลงจากระยะ Step ของเดิม เป็นความเร็ว)
-    # =====================================================================
-    max_joint_vel = np.radians(30.0)  # ความเร็วสูงสุด 30 องศา/วินาที ที่ 100%
-    max_slider_vel = 0.05             # ความเร็วสูงสุด 5 เซนติเมตร/วินาที ที่ 100%
+    # Check if the XY straight-line path passes through the forbidden box
+    def _hits_box(p1, p2, n=300):
+        for k in range(1, n):
+            pt = p1 + (k / n) * (p2 - p1)
+            if abs(pt[0]) <= BOX_X and abs(pt[1]) <= BOX_Y:
+                return True
+        return False
 
-    joint_vel = direction * (speed / 100.0) * max_joint_vel
-    slider_vel = direction * (speed / 100.0) * max_slider_vel
+    node.machine_state(1)
 
+    if _hits_box(cur_p[:2], tar_p[:2]):
+        # Via-point: push out along the direction perpendicular to the path,
+        # placed at the nearest box corner + margin, at the midpoint Z height.
+        seg    = tar_p[:2] - cur_p[:2]
+        perp   = np.array([-seg[1], seg[0]])            # 90° rotation
+        perp  /= np.linalg.norm(perp)                   # normalise
+        # Pick the perpendicular direction that points away from origin
+        if np.dot(perp, 0.5 * (cur_p[:2] + tar_p[:2])) < 0:
+            perp = -perp
+        via_xy = perp * (max(BOX_X, BOX_Y) + MARGIN)    # place outside box
+        via_p  = np.array([via_xy[0], via_xy[1], 0.5 * (cur_p[2] + tar_p[2])])
+        print(f"🚧 [BYPASS] เส้นทางตัดผ่านฐาน! แวะ via-point {np.round(via_p, 3)}")
+        _jacobian_move(via_p, tar_R, target_slider, task)
+        print(f"✅ [MOVE_EE] ถึง via-point มุ่งหน้าสู่เป้าหมาย")
+
+    print(f"🚀 [MOVE_EE] เคลื่อนที่ไปยังเป้าหมาย")
+    _jacobian_move(tar_p, tar_R, target_slider, task)
+    print("🎯 [MOVE_EE] เข้าสู่ตำแหน่งสำเร็จ!")
+    node.machine_state(2)
+
+def instant_jog_joint(task): # 👈 ใส่พารามิเตอร์ task กลับเข้ามาตรงนี้เพื่อแก้ TypeError
     dt = 0.02
-    duration = 0.1
-    elapsed = 0.0
-    
-    print(f"⚡ [JOG JOINT] แกน {axis} | ทิศ: {direction} | ความเร็ว: {speed}% (โหมดล็อคข้อต่อ 100%)")
+    WATCHDOG_TIMEOUT = 0.5  # เผื่อเวลา Network Jitter นิดหน่อย
 
-    # =====================================================================
-    # 1. บันทึกองศาข้อต่อและ Slider เริ่มต้น เพื่อล็อคแกนที่ไม่ได้สั่ง (Lock Reference)
-    # =====================================================================
+    # 1. บันทึก Task แรกที่ส่งมาจาก Thread ลงใน Node ทันที พร้อมประทับเวลาเริ่มต้น
+    node.latest_task = task
+    node.last_task_time = time.time()
+
+    max_joint_vel = np.radians(30.0)  
+    max_slider_vel = 0.05             
+    Kp = 5.0                          
+
+    print(f"⚡ [JOG JOINT] เริ่มต้นโหมดต่อเนื่อง (Continuous Watchdog Mode)")
+
+    # บันทึกองศาข้อต่อและ Slider เริ่มต้นเพียงครั้งแรกครั้งเดียว
     current_q = np.array(node.current_joint_positions)[:6]
     current_slider = node.current_slider_position
     
-    # ตัวแปรเหล่านี้จะล็อคตำแหน่งของข้อต่อที่ "ไม่ได้เลือก" เอาไว้ตลอดกาล
     target_q = current_q.copy()
     target_slider = current_slider
 
-    while elapsed < duration:
-        current_q = np.array(node.current_joint_positions)[:6]
-        current_slider = node.current_slider_position
+    while True:
+        current_time = time.time()
+
+        # อ่านคำสั่งล่าสุดที่อาจถูกอัปเดตจาก Callback ภายนอกเข้ามาระหว่างทาง
+        current_task = getattr(node, 'latest_task', None)
+        last_task_time = getattr(node, 'last_task_time', 0.0)
+
+        # 🛑 [CHECK TIMEOUT] ถ้าไม่มีคำสั่งใหม่ส่งเข้ามาภายในเวลาที่กำหนด ให้หลุดลูปเพื่อหยุดหุ่นยนต์
+        if current_task is None or (current_time - last_task_time) > WATCHDOG_TIMEOUT:
+            print(f"🛑 [JOG JOINT] Timeout (> {WATCHDOG_TIMEOUT}s) ไม่ได้รับคำสั่งใหม่ สั่งหยุดแกน")
+            break
+
+        if isinstance(current_task, list) and len(current_task) > 0:
+            current_task = current_task[0]
+            
+        axis = current_task.get('axis', '')
+        direction = current_task.get('direction', 0)
+        speed = current_task.get('speed', 0)
+
+        # ถ้าส่ง direction = 0 หรือ speed = 0 มา แปลว่าสั่งประคองตำแหน่งไว้
+        if direction == 0 or speed == 0:
+            node.publish_joints_velo([0.0] * 6, 0.0)
+            continue
+
+        # ตรวจสอบสถานะความปลอดภัย
+        if node.safety_status == 2 or node.robot_status == 2:
+            node.publish_joints_velo([0.0] * 6, 0.0) 
+            print("Pause Temporary")
+            continue
+
+        # คำนวณความเร็วของรอบนี้
+        joint_vel = direction * (speed / 100.0) * max_joint_vel
+        slider_vel = direction * (speed / 100.0) * max_slider_vel
 
         # =====================================================================
-        # 2. เลื่อนเป้าหมายข้อต่อ/สไลเดอร์เฉพาะแกนที่ได้รับคำสั่งไปตามเวลา
+        # 2. อัปเดตเป้าหมาย (สะสมตำแหน่งไปเรื่อยๆ)
         # =====================================================================
         if axis == 'joint_1':               target_q[0] += joint_vel * dt
         elif axis == 'joint_2':             target_q[1] += joint_vel * dt
@@ -779,84 +872,67 @@ def instant_jog_joint(task):
             break
 
         # =====================================================================
-        # 3. คำนวณ Error เพื่อดึงข้อต่อที่ไม่ได้รับคำสั่งให้ล็อคอยู่กับที่เป๊ะๆ 
+        # 3. คำนวณ Error เพื่อดึงข้อต่อที่ไม่ได้รับคำสั่งให้ล็อคอยู่กับที่
         # =====================================================================
+        current_q = np.array(node.current_joint_positions)[:6]
+        current_slider = node.current_slider_position
+
         e_joint = target_q - current_q
         e_slider = target_slider - current_slider
-
-        Kp = 5.0 # แรงดึงกลับให้ตรงเป้าหมาย (หากหมุนติดสั่นให้ลดค่าลงเหลือ 3.0 หรือ 2.0)
         
         q_dot = Kp * e_joint
         slider_dot = Kp * e_slider
 
         # คุมความเร็วไม่ให้กระชากเกินขีดจำกัด
-        q_dot = np.clip(q_dot, -1.5, 1.5)
+        q_dot = np.clip(q_dot, -0.05, 0.05)
         slider_dot = np.clip(slider_dot, -0.5, 0.5)
 
         # =====================================================================
-        # 4. ตรวจสอบ Joint Limit (ชนปุ๊บให้เบรกทุกแกนพร้อมกัน ห้ามฝืนหมุน)
+        # 4. ตรวจสอบ Joint Limit
         # =====================================================================
         if JOINT_LIMITS_ENABLED:
             limit_hit = False
-            for i in range(6):
-                # ถ้าองศาเกิน Limit และกำลังพยายามจะหมุนฝืนเข้าไปอีก
-                if (target_q[i] <= Q_MIN[i] and q_dot[i] < 0) or \
-                   (target_q[i] >= Q_MAX[i] and q_dot[i] > 0):
-                    print(f"⚠️ [JOG JOINT WARNING] หยุดแขนกล! Joint {i+1} ชนขีดจำกัดแล้ว")
+            for i_joint in range(6):  # เปลี่ยนชื่อตัวแปรลูปไม่ให้ซ้ำกับ 'i' ด้านนอก
+                if (target_q[i_joint] <= Q_MIN[i_joint] and q_dot[i_joint] < 0) or \
+                   (target_q[i_joint] >= Q_MAX[i_joint] and q_dot[i_joint] > 0):
+                    print(f"⚠️ [JOG JOINT WARNING] หยุดแขนกล! Joint {i_joint+1} ชนขีดจำกัดแล้ว")
                     limit_hit = True
                     break
             
-            # ตรวจสอบ Limit ของ Slider แยกต่างหาก
             if (target_slider <= SLIDER_MIN and slider_dot < 0) or \
                (target_slider >= SLIDER_MAX and slider_dot > 0):
                 print(f"⚠️ [JOG JOINT WARNING] หยุดแขนกล! รางสไลด์ (Slider) ชนขีดจำกัดแล้ว")
                 limit_hit = True
 
             if limit_hit:
-                break # เบรกออกจากลูปหยุด Jog ทันที
+                break 
 
         # ส่งคำสั่งความเร็วให้มอเตอร์
         node.publish_joints_velo(q_dot.tolist(), float(slider_dot))
-        time.sleep(dt)
-        elapsed += dt
 
-    # เมื่อครบเวลา (0.1 วินาที) สั่งหยุดสนิท
+    # เมื่อหลุดออกจากลูป (Timeout หรือชน Limit) สั่งหยุดสนิททันที
     node.publish_joints_velo([0.0] * 6, 0.0)
-    print(f"🛑 [JOG JOINT] หยุดแกน {axis}")
+    print("🛑 [JOG JOINT] จบการทำงานโหมดควบคุมต่อเนื่อง")
 
 def instant_jog_task(task):
-    if isinstance(task, list) and len(task) > 0:
-        task = task[0]
- 
-    axis = task.get('axis', '')
-    direction = task.get('direction', 0)
-    speed = task.get('speed', 0)
- 
-    tcp_x = task.get('tcp_x', 0.0) / 1000.0
-    tcp_y = task.get('tcp_y', 0.0) / 1000.0
-    tcp_z = task.get('tcp_z', 0.0) / 1000.0
-    tcp_offset = np.array([tcp_x, tcp_y, tcp_z])
- 
-    if direction == 0 or speed == 0:
-        return
- 
-    if node.safety_status == 2 or node.robot_status == 2:
-        while node.safety_status == 2 or node.robot_status == 2:
-            print("Pause Temporary")
-            time.sleep(0.1)
- 
-    # ความเร็วสูงสุด
-    max_linear_vel = 0.15           # 15 cm/s at 100%
-    max_angular_vel = np.radians(30)      # 30 deg/s at 100%
- 
-    linear_vel = direction * (speed / 100.0) * max_linear_vel
-    angular_vel = direction * (speed / 100.0) * max_angular_vel
- 
     dt = 0.02
-    duration = 0.1
-    elapsed = 0.0
-    print(f"⚡ [JOG TASK] แกน {axis} | ทิศ: {direction} | ความเร็ว: {speed}%")
+    WATCHDOG_TIMEOUT = 0.25  # เผื่อเวลาสำหรับ Network Jitter สัญญาณดีเลย์
 
+    # 1. ผูกค่าคำสั่งแรกเข้ากับ Node เพื่อเปิดระบบ Watchdog
+    node.latest_task = task
+    node.last_task_time = time.time()
+
+    # ค่าความเร็วสูงสุด
+    max_linear_vel = 0.15                 # 15 cm/s at 100%
+    max_angular_vel = np.radians(30)      # 30 deg/s at 100%
+    Kp_pos = 5.0 
+    Kp_ori = 5.0 
+
+    print("⚡ [JOG TASK] เริ่มต้นโหมดคาร์ทีเซียนแบบต่อเนื่อง (Continuous Watchdog Mode)")
+
+    # =====================================================================
+    # บันทึกตำแหน่งเริ่มต้น (Reference) "ครั้งแรกครั้งเดียว" เพื่อใช้คำนวณสะสมพิกัด
+    # =====================================================================
     current_q = np.array(node.current_joint_positions)[:6]
     current_slider = node.current_slider_position
     T_start_list = forward_kinematics_matrices(current_q, L1, L2, L3, D6, current_slider)
@@ -864,7 +940,48 @@ def instant_jog_task(task):
     target_pos = T_start_list[-1][:3, 3].copy()
     target_R = T_start_list[-1][:3, :3].copy() 
 
-    while elapsed < duration:
+    while True:
+        current_time = time.time()
+
+        # อ่านคำสั่งปัจจุบันที่ส่งมาจากฝั่ง Network / UI เปลียนแปลงแบบ Real-time
+        current_task = getattr(node, 'latest_task', None)
+        last_task_time = getattr(node, 'last_task_time', 0.0)
+
+        # 🛑 [CHECK TIMEOUT] หากไม่มีคำสั่งใหม่เข้ามาภายใน 25ms ให้เบรกออกจากลูปทันที
+        if current_task is None or (current_time - last_task_time) > WATCHDOG_TIMEOUT:
+            print(f"🛑 [JOG TASK] Timeout (> {WATCHDOG_TIMEOUT}s) ไม่ได้รับคำสั่งใหม่ สั่งหยุดเคลื่อนที่")
+            break
+
+        # แกะค่าตัวแปรภายในลูป เพื่อรองรับการปรับความเร็วหรือทิศทางแบบ Dynamic
+        if isinstance(current_task, list) and len(current_task) > 0:
+            current_task = current_task[0]
+     
+        axis = current_task.get('axis', '')
+        direction = current_task.get('direction', 0)
+        speed = current_task.get('speed', 0)
+     
+        tcp_x = current_task.get('tcp_x', 0.0) / 1000.0
+        tcp_y = current_task.get('tcp_y', 0.0) / 1000.0
+        tcp_z = current_task.get('tcp_z', 0.0) / 1000.0
+        tcp_offset = np.array([tcp_x, tcp_y, tcp_z])
+
+        # ถ้าส่งทิศทางหรือความเร็วเป็น 0 ให้สั่งหยุดชั่วคราวและวนลูปประคองตำแหน่งไว้
+        if direction == 0 or speed == 0:
+            node.publish_joints_velo([0.0] * 6, 0.0)
+            continue
+     
+        # ตรวจสอบสถานะความปลอดภัยของระบบ Robot
+        if node.safety_status == 2 or node.robot_status == 2:
+            node.publish_joints_velo([0.0] * 6, 0.0)
+            print("Pause Temporary")
+
+            continue
+     
+        # คำนวณความเร็วเชิงเส้นและความเร็วเชิงมุมรอบนี้
+        linear_vel = direction * (speed / 100.0) * max_linear_vel
+        angular_vel = direction * (speed / 100.0) * max_angular_vel
+ 
+        # อัปเดตพิกัดปัจจุบันจริงของหุ่นยนต์ในรอบนี้
         current_q = np.array(node.current_joint_positions)[:6]
         current_slider = node.current_slider_position
         
@@ -886,42 +1003,35 @@ def instant_jog_task(task):
         elif axis == 'yaw':   next_target_R = rpy_to_matrix(0, 0, angular_vel * dt) @ next_target_R
 
         # --- เช็คพื้นที่ต้องห้าม X=[-0.15, 0.15], Y=[-0.15, 0.15] ---
-        c_tcp = target_pos + (target_R @ tcp_offset)           # ตำแหน่งปัจจุบันก่อนขยับ
-        n_tcp = next_target_pos + (next_target_R @ tcp_offset) # ตำแหน่งที่จะขยับไป
+        c_tcp = target_pos + (target_R @ tcp_offset)           
+        n_tcp = next_target_pos + (next_target_R @ tcp_offset) 
 
         in_zone_now = (-0.15 <= c_tcp[0] <= 0.15) and (-0.15 <= c_tcp[1] <= 0.15)
         in_zone_next = (-0.15 <= n_tcp[0] <= 0.15) and (-0.15 <= n_tcp[1] <= 0.15)
 
         if in_zone_next:
             if in_zone_now:
-                # ถ้าหุ่นยนต์ "ติดอยู่ข้างในอยู่แล้ว" 
-                # ให้เทียบระยะห่าง (Distance) จากฐาน (X=0, Y=0)
                 dist_now = c_tcp[0]**2 + c_tcp[1]**2
                 dist_next = n_tcp[0]**2 + n_tcp[1]**2
-                
-                # ถ้าระยะห่างน้อยลงแปลว่ากำลังมุดลึกเข้าฐาน -> เบรกทันที!
                 if dist_next < dist_now: 
                     print(f"⚠️ [JOG TASK] ติดอยู่ในเขตต้องห้าม! ต้องกดปุ่ม Jog หันออกเท่านั้น")
                     break
             else:
-                # ถ้าพยายามวิ่งจากข้างนอก เข้าไปข้างในเขตต้องห้าม -> เบรกทันที!
                 print(f"⚠️ [JOG TASK WARNING] ห้ามเข้าพื้นที่หวงห้าม! หยุดการเคลื่อนที่")
                 break
 
-        # หากปลอดภัย (ผ่านการเช็คด้านบน) ถึงจะอนุญาตให้อัพเดทเป้าหมายใหม่จริงๆ
+        # ผ่านการตรวจสอบความปลอดภัย -> อัปเดตพิกัดเป้าหมายจริง
         target_pos = next_target_pos
         target_R = next_target_R
 
         # =====================================================================
-        # 2. คำนวณ Error ดึงหุ่นยนต์กลับเข้าสู่เป้าหมาย (ล็อก Roll Pitch Yaw 100%)
+        # 2. คำนวณ Error ดึงหุ่นยนต์เข้าสู่เป้าหมาย (ล็อก Roll Pitch Yaw)
         # =====================================================================
         e_pos = target_pos - curr_pos
         e_ori = 0.5 * (np.cross(curr_R[:, 0], target_R[:, 0]) + 
                        np.cross(curr_R[:, 1], target_R[:, 1]) + 
                        np.cross(curr_R[:, 2], target_R[:, 2]))
         
-        Kp_pos = 5.0 
-        Kp_ori = 5.0 
         V_target_abs = np.concatenate((Kp_pos * e_pos, Kp_ori * e_ori))
 
         # =====================================================================
@@ -936,24 +1046,26 @@ def instant_jog_task(task):
         J_pinv = J.T @ np.linalg.inv(J @ J.T + lambda_sq * np.eye(6))
         q_dot = J_pinv @ V_target_abs
 
-        # ตรวจสอบ Joint Limit
+        # =====================================================================
+        # 4. ตรวจสอบ Joint Limit
+        # =====================================================================
         if JOINT_LIMITS_ENABLED:
             limit_hit = False
-            for i in range(6):
-                if (current_q[i] <= Q_MIN[i] and q_dot[i] < 0) or \
-                   (current_q[i] >= Q_MAX[i] and q_dot[i] > 0):
-                    print(f"⚠️ [JOG TASK WARNING] หยุดแขนกล! Joint {i+1} ชนขีดจำกัดแล้ว")
+            for i_joint in range(6):
+                if (current_q[i_joint] <= Q_MIN[i_joint] and q_dot[i_joint] < 0) or \
+                   (current_q[i_joint] >= Q_MAX[i_joint] and q_dot[i_joint] > 0):
+                    print(f"⚠️ [JOG TASK WARNING] หยุดแขนกล! Joint {i_joint+1} ชนขีดจำกัดแล้ว")
                     limit_hit = True
                     break
             if limit_hit:
                 break
 
+        # ส่งคำสั่งไปที่มอเตอร์
         node.publish_joints_velo(q_dot.tolist(), 0.0)
-        time.sleep(dt)
-        elapsed += dt
  
+    # ออกจากลูปทำงาน (เมื่อ Timeout หรือชน Limit) -> สั่งหยุดสนิททันที
     node.publish_joints_velo([0.0] * 6, 0.0)
-    print(f"🛑 [JOG TASK] หยุดแกน {axis}")
+    print(f"🛑 [JOG TASK] จบการทำงานโหมดควบคุมต่อเนื่องเชิงเส้น")
 
 def move_forward_and_align(dist, max_linear_speed=0.05, max_angular_speed=0.5):
         distance = dist.get('forward')/1000
@@ -1057,8 +1169,6 @@ def move_forward_and_align(dist, max_linear_speed=0.05, max_angular_speed=0.5):
             q_dot = np.clip(q_dot, -1.0, 1.0)
             node.publish_joints_velo(q_dot.tolist(), 0.0)
             
-            time.sleep(0.01) # Update rate (100 Hz)
-
 def run_pose(task):
     target_task = None
     try:
@@ -1134,6 +1244,105 @@ def main(args=None):
 
     print("✅ Node หุ่นยนต์ทำงานแล้ว (พร้อม Limit Control)")
     print("📡 รอรับคำสั่งผ่าน Topic: /goto_position และ /force_sensor")
+
+    def _run_xyz_gui():
+        BG, PANEL, ACCENT, TEXT, RED, GREEN = '#0f1117','#1a1d27','#00e5ff','#e8eaf6','#ff5252','#69ff6e'
+        MUTED, PINK = '#555870', '#ff4081'
+
+        root = tk.Tk()
+        root.title('XYZ → /goto_position')
+        root.configure(bg=BG)
+        root.resizable(False, False)
+
+        fields = [
+            ('X (m)',      -0.8,  0.8,  0.0),
+            ('Y (m)',      -0.8,  0.8,  0.0),
+            ('Z (m)',       0.0,  1.2,  0.5),
+            ('Roll (°)',  -180,  180,   0.0),
+            ('Pitch (°)', -180,  180,   0.0),
+            ('Yaw (°)',   -180,  180,   0.0),
+        ]
+        vars_ = []
+
+        tk.Label(root, text='XYZ GOTO', font=('Courier New', 12, 'bold'),
+                 fg=ACCENT, bg=BG).grid(row=0, column=0, columnspan=3, pady=(12,4), padx=16, sticky='w')
+        tk.Frame(root, bg=ACCENT, height=1).grid(row=1, column=0, columnspan=3, sticky='ew', padx=16, pady=(0,8))
+
+        for i, (label, lo, hi, default) in enumerate(fields):
+            tk.Label(root, text=label, width=11, anchor='w',
+                     font=('Courier New', 9, 'bold'), fg=TEXT, bg=BG).grid(
+                         row=i+2, column=0, padx=(16,4), pady=3, sticky='w')
+            var = tk.DoubleVar(value=default)
+            vars_.append(var)
+            ent = tk.Entry(root, textvariable=var, width=10,
+                           font=('Courier New', 10), bg=PANEL, fg=ACCENT,
+                           insertbackground=ACCENT, relief='flat', bd=4)
+            ent.grid(row=i+2, column=1, padx=4, pady=3)
+
+        tk.Frame(root, bg=MUTED, height=1).grid(row=8, column=0, columnspan=3, sticky='ew', padx=16, pady=(8,4))
+
+        # Speed
+        tk.Label(root, text='Speed %', width=11, anchor='w',
+                 font=('Courier New', 9, 'bold'), fg=TEXT, bg=BG).grid(
+                     row=9, column=0, padx=(16,4), pady=3, sticky='w')
+        speed_var = tk.IntVar(value=50)
+        tk.Entry(root, textvariable=speed_var, width=10,
+                 font=('Courier New', 10), bg=PANEL, fg=PINK,
+                 insertbackground=PINK, relief='flat', bd=4).grid(row=9, column=1, padx=4, pady=3)
+
+        # Mode
+        tk.Label(root, text='Mode', width=11, anchor='w',
+                 font=('Courier New', 9, 'bold'), fg=TEXT, bg=BG).grid(
+                     row=10, column=0, padx=(16,4), pady=3, sticky='w')
+        mode_var = tk.StringVar(value='effector')
+        mode_frame = tk.Frame(root, bg=BG)
+        mode_frame.grid(row=10, column=1, pady=3, sticky='w')
+        for val, lbl in [('effector', 'Effector'), ('joint', 'Joint')]:
+            tk.Radiobutton(mode_frame, text=lbl, variable=mode_var, value=val,
+                           font=('Courier New', 9), fg=TEXT, bg=BG,
+                           selectcolor=PANEL, activebackground=BG,
+                           activeforeground=ACCENT).pack(side='left', padx=4)
+
+        # Status label
+        status_var = tk.StringVar(value='')
+        status_lbl = tk.Label(root, textvariable=status_var,
+                              font=('Courier New', 9), fg=RED, bg=BG, wraplength=260)
+        status_lbl.grid(row=11, column=0, columnspan=3, padx=16, pady=(4,0))
+
+        def _send():
+            try:
+                x     = vars_[0].get()
+                y     = vars_[1].get()
+                z     = vars_[2].get()
+                roll  = np.radians(vars_[3].get())
+                pitch = np.radians(vars_[4].get())
+                yaw   = np.radians(vars_[5].get())
+                speed = int(speed_var.get())
+                mode  = mode_var.get()
+                R_tar = rpy_to_matrix(roll, pitch, yaw)
+                q, reachable = inverse_kinematics_6dof(
+                    np.array([x, y, z]), R_tar, L1, L2, L3, D6)
+                if not reachable:
+                    status_var.set('Out of reach')
+                    send_btn.config(bg=RED)
+                    return
+                rail_mm = node.current_slider_position * 1000.0
+                node.publish_goto(np.degrees(q).tolist(), rail_mm, speed, mode)
+                status_var.set(f'Sent  J={np.degrees(q).round(1).tolist()}')
+                send_btn.config(bg=ACCENT)
+            except Exception as e:
+                status_var.set(f'Error: {e}')
+
+        send_btn = tk.Button(root, text='SEND TO ROBOT',
+                             font=('Courier New', 10, 'bold'),
+                             bg=ACCENT, fg=BG, activebackground='#00bcd4',
+                             bd=0, padx=20, pady=8, cursor='hand2',
+                             command=_send)
+        send_btn.grid(row=12, column=0, columnspan=3, pady=12, padx=16, sticky='ew')
+
+        root.mainloop()
+
+    threading.Thread(target=_run_xyz_gui, daemon=True).start()
 
     try:
         while rclpy.ok():

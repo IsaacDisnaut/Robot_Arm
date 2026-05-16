@@ -33,7 +33,7 @@ def generate_launch_description():
         # ),
         Node(
             package='robot_arm',
-            executable='plan',
+            executable='plot',
             output='screen'
         ),
         Node(
@@ -48,11 +48,11 @@ def generate_launch_description():
             executable='IK',
             output='screen'
         ),
-        Node(
-            package='robot_arm',
-            executable='test',
-            output='screen'
-        ),
+        # Node(
+        #     package='robot_arm',
+        #     executable='test',
+        #     output='screen'
+        # ),
         ExecuteProcess(
             cmd=['npm', 'start'],
             cwd=web_dir,
